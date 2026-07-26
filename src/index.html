@@ -1,0 +1,836 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MealDesk POS</title>
+  <link rel="stylesheet" href="styles.css" />
+  <script type="module" src="/main.js" defer></script>
+</head>
+
+<body>
+  <!-- Login Screen -->
+  <div id="login-screen" class="auth-container">
+    <div class="auth-card">
+      <div class="auth-header">
+        <div class="auth-logo">MealDesk</div>
+        <div class="auth-subtitle">Restaurant POS System</div>
+      </div>
+      <form id="login-form">
+        <div class="form-group">
+          <label class="form-label" for="username">Username</label>
+          <input type="text" id="username" class="form-input" placeholder="Enter username" required />
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="password">Password</label>
+          <input type="password" id="password" class="form-input" placeholder="Enter password" required />
+        </div>
+        <button type="submit" class="auth-btn">Log In</button>
+      </form>
+      <div id="login-error" class="auth-error"></div>
+    </div>
+  </div>
+
+  <!-- Main POS Shell -->
+  <div id="app-screen" class="app-container hidden">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <span class="sidebar-brand">MealDesk</span>
+      </div>
+      <div class="sidebar-user">
+        <span id="display-user-name" class="user-name">Cashier</span>
+        <span id="display-user-role" class="user-role">Cashier</span>
+      </div>
+      <nav class="sidebar-nav">
+        <div class="nav-item active" data-panel="pos">
+          <span class="nav-icon">🛒</span>
+          <span>Billing POS</span>
+        </div>
+        <div class="nav-item" data-panel="tables">
+          <span class="nav-icon">🪑</span>
+          <span>Tables</span>
+        </div>
+        <div class="nav-item" data-panel="kitchen">
+          <span class="nav-icon">🍳</span>
+          <span>Kitchen View</span>
+        </div>
+        <div class="nav-item" data-panel="menu-editor">
+          <span class="nav-icon">🍔</span>
+          <span>Menu Editor</span>
+        </div>
+        <div class="nav-item" data-panel="inventory">
+          <span class="nav-icon">📦</span>
+          <span>Inventory</span>
+        </div>
+        <div class="nav-item" data-panel="customers">
+          <span class="nav-icon">👥</span>
+          <span>Customers</span>
+        </div>
+        <div class="nav-item" data-panel="reports">
+          <span class="nav-icon">📊</span>
+          <span>Reports</span>
+        </div>
+        <div class="nav-item" data-panel="settings">
+          <span class="nav-icon">⚙️</span>
+          <span>Settings</span>
+        </div>
+      </nav>
+      <div class="sidebar-footer">
+        <button id="logout-btn" class="logout-btn">
+          <span>🚪</span> Logout
+        </button>
+      </div>
+    </aside>
+
+    <!-- Main Work Area -->
+    <main class="main-work-area">
+      <!-- Header -->
+      <header class="app-header">
+        <div class="header-title-container">
+          <span id="active-panel-title" class="header-title">Billing POS</span>
+          <span id="restaurant-name-header" class="restaurant-subtitle">MealDesk Bistro</span>
+        </div>
+        <div class="header-meta">
+          <div id="app-clock" class="header-clock">--:--:-- --</div>
+          <div class="db-status">
+            <span class="status-dot"></span>
+            <span>Offline Database Connected</span>
+          </div>
+        </div>
+      </header>
+
+      <!-- Panels Container -->
+
+      <!-- 1. POS Billing Panel -->
+      <div id="panel-pos" class="panel">
+        <div class="pos-container">
+          <section class="menu-section">
+            <div id="pos-categories" class="categories-bar"></div>
+            <div class="search-bar">
+              <span class="search-icon">🔍</span>
+              <input type="text" id="product-search" class="search-input" placeholder="Search menu items..." />
+            </div>
+            <div class="products-grid-container">
+              <div id="pos-products" class="products-grid"></div>
+            </div>
+          </section>
+
+          <section class="cart-section">
+            <div class="cart-header">
+              <span class="cart-title">Current Order</span>
+              <div style="display: flex; gap: 4px;">
+                <button id="hold-bill-btn" class="quick-role-btn">Hold</button>
+                <button id="resume-bill-btn" class="quick-role-btn">Resume</button>
+                <button id="clear-cart-btn" class="quick-role-btn"
+                  style="color: var(--danger); border-color: rgba(239, 68, 68, 0.2);">Clear</button>
+              </div>
+            </div>
+
+            <!-- Customer Selection & Table Selection -->
+            <div style="padding: 10px 16px; border-bottom: 1px solid var(--border); display: flex; gap: 8px;">
+              <select id="cart-customer-select" class="form-input" style="padding: 6px; font-size: 0.85rem; flex: 1;">
+                <option value="">Walk-in Customer shyam</option>
+              </select>
+              <select id="cart-table-select" class="form-input" style="padding: 6px; font-size: 0.85rem; width: 100px;">
+                <option value="">No Table</option>
+              </select>
+            </div>
+
+            <div id="cart-items-list" class="cart-items">
+              <div class="cart-empty">
+                <span>🛒</span>
+                <span>Order is empty</span>
+              </div>
+            </div>
+
+            <div class="cart-summary">
+              <div class="summary-row">
+                <span>Subtotal</span>
+                <span id="cart-subtotal">₹0.00</span>
+              </div>
+              <div class="summary-row" style="align-items: center;">
+                <span>Discount</span>
+                <div style="display: flex; align-items: center; gap: 4px;">
+                  <input type="number" id="cart-discount-input" value="0" min="0" max="100"
+                    style="width: 50px; padding: 2px 4px; border-radius: 4px; border: 1px solid var(--border); background: var(--bg-card); color: white; text-align: center;" />
+                  <span>%</span>
+                </div>
+              </div>
+              <div class="summary-row" style="align-items: center;">
+                <span>Service Charge</span>
+                <div style="display: flex; align-items: center; gap: 4px;">
+                  <input type="number" id="cart-service-input" value="0" min="0" max="25"
+                    style="width: 50px; padding: 2px 4px; border-radius: 4px; border: 1px solid var(--border); background: var(--bg-card); color: white; text-align: center;" />
+                  <span>%</span>
+                </div>
+              </div>
+              <div class="summary-row">
+                <span>GST Tax</span>
+                <span id="cart-tax">₹0.00</span>
+              </div>
+              <div class="summary-row total">
+                <span>Total</span>
+                <span id="cart-total">₹0.00</span>
+              </div>
+              <button id="checkout-btn" class="checkout-btn">
+                <span>💳</span> Collect Payment
+              </button>
+            </div>
+          </section>
+        </div>
+      </div>
+
+      <!-- 2. Tables Panel -->
+      <div id="panel-tables" class="panel hidden">
+        <div class="tables-container">
+          <div style="margin-bottom: 20px; display: flex; gap: 10px;">
+            <button id="table-transfer-btn" class="auth-btn" style="margin: 0; width: auto; padding: 8px 16px;">Transfer
+              Bill</button>
+            <button id="table-merge-btn" class="auth-btn"
+              style="margin: 0; width: auto; padding: 8px 16px; background: var(--bg-hover);">Merge Tables</button>
+          </div>
+          <div id="tables-grid" class="tables-grid"></div>
+        </div>
+      </div>
+
+      <!-- 3. Kitchen View Panel -->
+      <div id="panel-kitchen" class="panel hidden">
+        <div class="tables-container" style="padding: 24px;">
+          <div id="kitchen-kot-grid" class="tables-grid"
+            style="grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 20px;">
+            <div class="cart-empty" style="grid-column: 1/-1; height: 300px;">
+              <span>🍳</span>
+              <span>No active KOT tickets</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 4. Menu Editor Panel -->
+      <div id="panel-menu-editor" class="panel hidden">
+        <div style="flex: 1; display: flex; padding: 24px; gap: 20px; overflow: hidden;">
+          <!-- Categories CRUD -->
+          <div class="settings-card"
+            style="width: 320px; display: flex; flex-direction: column; overflow: hidden; margin: 0;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+              <h3 class="settings-title" style="margin: 0; border: none; padding: 0;">Categories</h3>
+              <button id="add-category-btn" class="quick-role-btn" style="padding: 4px 8px;">+ Add</button>
+            </div>
+            <div id="menu-editor-categories"
+              style="flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 8px;"></div>
+          </div>
+
+          <!-- Products CRUD -->
+          <div class="settings-card"
+            style="flex: 1; display: flex; flex-direction: column; overflow: hidden; margin: 0;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+              <h3 class="settings-title" style="margin: 0; border: none; padding: 0;">Products</h3>
+              <button id="add-product-btn" class="quick-role-btn" style="padding: 4px 8px;">+ Add Product</button>
+            </div>
+            <div style="flex: 1; overflow-y: auto;">
+              <table style="width: 100%; border-collapse: collapse; text-align: left;">
+                <thead>
+                  <tr style="border-bottom: 1px solid var(--border); color: var(--text-secondary); font-size: 0.85rem;">
+                    <th style="padding: 10px;">Name</th>
+                    <th style="padding: 10px;">Price</th>
+                    <th style="padding: 10px;">GST Rate</th>
+                    <th style="padding: 10px;">Status</th>
+                    <th style="padding: 10px; text-align: right;">Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="menu-editor-products-list"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 5. Inventory Panel -->
+      <div id="panel-inventory" class="panel hidden">
+        <div class="tables-container" style="padding: 24px; display: flex; flex-direction: column; gap: 20px;">
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <h2 style="font-size: 1.3rem;">Inventory Stock Levels</h2>
+            <button id="add-purchase-btn" class="auth-btn" style="margin:0; width:auto; padding: 8px 16px;">Log Purchase
+              (Add Stock)</button>
+          </div>
+          <div class="settings-card" style="margin:0; padding:0; overflow:hidden;">
+            <table style="width: 100%; border-collapse: collapse; text-align: left;">
+              <thead>
+                <tr
+                  style="border-bottom: 1px solid var(--border); color: var(--text-secondary); background: rgba(0,0,0,0.15);">
+                  <th style="padding: 12px 16px;">Product Name</th>
+                  <th style="padding: 12px 16px;">Category</th>
+                  <th style="padding: 12px 16px;">Unit Price</th>
+                  <th style="padding: 12px 16px;">Stock Qty</th>
+                  <th style="padding: 12px 16px;">Status</th>
+                </tr>
+              </thead>
+              <tbody id="inventory-stock-list"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- 6. Customers Panel -->
+      <div id="panel-customers" class="panel hidden">
+        <div class="tables-container" style="padding: 24px; display: flex; flex-direction: column; gap: 20px;">
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <h2 style="font-size: 1.3rem;">Customer Database</h2>
+            <button id="add-customer-btn" class="auth-btn" style="margin: 0; width: auto; padding: 8px 16px;">+ Register
+              Customer</button>
+          </div>
+          <div class="settings-card" style="margin:0; padding:0; overflow:hidden;">
+            <table style="width: 100%; border-collapse: collapse; text-align: left;">
+              <thead>
+                <tr
+                  style="border-bottom: 1px solid var(--border); color: var(--text-secondary); background: rgba(0,0,0,0.15);">
+                  <th style="padding: 12px 16px;">Name</th>
+                  <th style="padding: 12px 16px;">Phone</th>
+                  <th style="padding: 12px 16px;">Email</th>
+                  <th style="padding: 12px 16px;">Loyalty Points</th>
+                  <th style="padding: 12px 16px; text-align: right;">Action</th>
+                </tr>
+              </thead>
+              <tbody id="customers-list"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- 7. Reports Panel -->
+      <div id="panel-reports" class="panel hidden">
+        <div class="tables-container" style="padding: 24px; display: flex; flex-direction: column; gap: 24px;">
+          <div
+            style="display: flex; gap: 15px; align-items: flex-end; background: var(--bg-panel); padding: 15px; border-radius: 8px; border: 1px solid var(--border);">
+            <div class="form-group" style="margin:0;">
+              <label class="form-label" style="font-size:0.75rem;">From Date</label>
+              <input type="text" id="report-from-date" class="form-input" style="padding: 8px; width: 140px;"
+                placeholder="DD/MM/YYYY" />
+            </div>
+            <div class="form-group" style="margin:0;">
+              <label class="form-label" style="font-size:0.75rem;">To Date</label>
+              <input type="text" id="report-to-date" class="form-input" style="padding: 8px; width: 140px;"
+                placeholder="DD/MM/YYYY" />
+            </div>
+            <button id="generate-report-btn" class="auth-btn" style="margin:0; width:auto; padding: 8px 20px;">Generate
+              Report</button>
+          </div>
+
+          <!-- Stats grid -->
+          <div class="tables-grid" style="grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 20px;">
+            <div class="settings-card" style="margin:0; text-align: center; border-top: 4px solid var(--primary);">
+              <div style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 8px;">TOTAL REVENUE</div>
+              <h3 id="report-total-revenue" style="font-size: 1.8rem; font-weight:700;">₹0.00</h3>
+            </div>
+            <div class="settings-card" style="margin:0; text-align: center; border-top: 4px solid var(--accent);">
+              <div style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 8px;">TAXES COLLECTED (GST)
+              </div>
+              <h3 id="report-total-tax" style="font-size: 1.8rem; font-weight:700;">₹0.00</h3>
+            </div>
+            <div class="settings-card" style="margin:0; text-align: center; border-top: 4px solid var(--success);">
+              <div style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 8px;">ORDER COUNT</div>
+              <h3 id="report-order-count" style="font-size: 1.8rem; font-weight:700;">0</h3>
+            </div>
+            <div class="settings-card" style="margin:0; text-align: center; border-top: 4px solid var(--warning);">
+              <div style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 8px;">AVERAGE BILLING</div>
+              <h3 id="report-avg-bill" style="font-size: 1.8rem; font-weight:700;">₹0.00</h3>
+            </div>
+          </div>
+
+          <!-- Advanced Reports Grid -->
+          <div style="display: flex; gap: 20px;">
+            <!-- Left Column: Product Sales & Payment Modes -->
+            <div style="flex: 1; display: flex; flex-direction: column; gap: 20px;">
+              <div class="settings-card" style="margin: 0; padding: 20px;">
+                <h3 class="settings-title" style="margin-bottom: 12px; border:none; padding:0;">Payment Mode Breakdown
+                </h3>
+                <div style="display: flex; flex-direction: column; gap: 8px;">
+                  <div style="display: flex; justify-content: space-between; font-size: 0.9rem;">
+                    <span>Cash Sales:</span>
+                    <span id="report-cash-sales" style="font-weight: 600;">₹0.00</span>
+                  </div>
+                  <div style="display: flex; justify-content: space-between; font-size: 0.9rem;">
+                    <span>UPI Sales:</span>
+                    <span id="report-upi-sales" style="font-weight: 600;">₹0.00</span>
+                  </div>
+                  <div style="display: flex; justify-content: space-between; font-size: 0.9rem;">
+                    <span>Card Sales:</span>
+                    <span id="report-card-sales" style="font-weight: 600;">₹0.00</span>
+                  </div>
+                  <div style="display: flex; justify-content: space-between; font-size: 0.9rem;">
+                    <span>Split/Mixed Sales:</span>
+                    <span id="report-mixed-sales" style="font-weight: 600;">₹0.00</span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="settings-card"
+                style="margin: 0; padding: 20px; flex: 1; display: flex; flex-direction: column; overflow: hidden;">
+                <h3 class="settings-title" style="margin-bottom: 12px; border:none; padding:0;">Top Selling Products
+                </h3>
+                <div style="flex: 1; overflow-y: auto;">
+                  <table style="width:100%; border-collapse:collapse; font-size: 0.85rem; text-align: left;">
+                    <thead>
+                      <tr style="border-bottom: 1px solid var(--border); color: var(--text-secondary);">
+                        <th style="padding: 6px;">Product</th>
+                        <th style="padding: 6px;">Category</th>
+                        <th style="padding: 6px; text-align: center;">Qty</th>
+                        <th style="padding: 6px; text-align: right;">Total</th>
+                      </tr>
+                    </thead>
+                    <tbody id="report-products-body"></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+
+            <!-- Right Column: Past Completed Bills (Reprint/Duplicate) -->
+            <div class="settings-card"
+              style="width: 380px; margin: 0; padding: 20px; display: flex; flex-direction: column; overflow: hidden; max-height: 450px;">
+              <h3 class="settings-title" style="margin-bottom: 12px; border:none; padding:0;">Past Transactions History
+              </h3>
+              <div id="report-completed-bills-list"
+                style="flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 8px;"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 8. Settings Panel -->
+      <div id="panel-settings" class="panel hidden">
+        <div class="settings-container">
+          <div class="settings-grid">
+            <div class="settings-card">
+              <h3 class="settings-title">Restaurant Details</h3>
+              <form id="settings-rest-form">
+                <div class="form-group">
+                  <label class="form-label">Restaurant Name</label>
+                  <input type="text" id="settings-input-name" class="form-input" required />
+                </div>
+                <div class="form-group">
+                  <label class="form-label">GSTIN</label>
+                  <input type="text" id="settings-input-gstin" class="form-input" />
+                </div>
+                <div class="form-group">
+                  <label class="form-label">Address</label>
+                  <input type="text" id="settings-input-address" class="form-input" />
+                </div>
+                <div class="form-group">
+                  <label class="form-label">Phone</label>
+                  <input type="text" id="settings-input-phone" class="form-input" />
+                </div>
+                <div class="form-group">
+                  <label class="form-label">Email</label>
+                  <input type="email" id="settings-input-email" class="form-input" />
+                </div>
+                <div class="form-group">
+                  <label class="form-label">Receipt Footer Message</label>
+                  <input type="text" id="settings-input-footer" class="form-input" />
+                </div>
+                <button type="submit" class="auth-btn" style="width: auto; margin:0; padding: 10px 20px;">Save
+                  Changes</button>
+              </form>
+            </div>
+
+            <div class="settings-card">
+              <h3 class="settings-title">Application Preferences</h3>
+              <div class="form-group">
+                <label class="form-label">Theme</label>
+                <select id="settings-theme-select" class="form-input">
+                  <option value="dark">Dark Theme (Default)</option>
+                  <option value="light">Light Theme</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label class="form-label">Default GST rate</label>
+                <select id="settings-gst-default" class="form-input">
+                  <option value="18">18% (Standard REST)</option>
+                  <option value="5">5% (Cafe/Beverages)</option>
+                  <option value="0">0% (Nil)</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label class="form-label">Thermal Printer Output</label>
+                <select id="settings-printer-select" class="form-input">
+                  <option value="simulated">On-Screen Simulation</option>
+                  <option value="system">System Default Printer</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="settings-card">
+              <h3 class="settings-title">Local Database Utilities</h3>
+              <div class="form-group">
+                <label class="form-label">Backup Target Directory Path</label>
+                <input type="text" id="settings-backup-path" class="form-input"
+                  placeholder="e.g. /home/shyam/Downloads" />
+              </div>
+              <button id="settings-btn-backup" class="auth-btn"
+                style="width: auto; margin:0; margin-bottom: 20px; padding: 10px 20px;">Backup Database</button>
+
+              <div class="form-group">
+                <label class="form-label">Restore Source File Path</label>
+                <input type="text" id="settings-restore-path" class="form-input"
+                  placeholder="e.g. /home/shyam/Downloads/mealdesk_backup.db" />
+              </div>
+              <button id="settings-btn-restore" class="auth-btn"
+                style="width: auto; margin:0; padding: 10px 20px; background: var(--warning); color: #111;">Restore
+                Database</button>
+            </div>
+
+            <div class="settings-card">
+              <h3 class="settings-title">System Status</h3>
+              <div class="settings-info-row">
+                <div class="settings-info-label">Tauri Engine:</div>
+                <div class="settings-info-value">v2.x (Rust Core)</div>
+              </div>
+              <div class="settings-info-row">
+                <div class="settings-info-label">Database Type:</div>
+                <div class="settings-info-value">SQLite (rusqlite local connection)</div>
+              </div>
+              <div class="settings-info-row">
+                <div class="settings-info-label">Storage Location:</div>
+                <div class="settings-info-value">App Data Dir (mealdesk.db)</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- Modals Layout -->
+
+  <!-- Hold Order Modal -->
+  <div id="hold-modal" class="modal-overlay hidden">
+    <div class="modal-content">
+      <h3 class="modal-title">Hold Current Order</h3>
+      <p class="modal-desc">Provide a name or table reference to hold this bill draft.</p>
+      <div class="form-group">
+        <input type="text" id="hold-name-input" class="form-input" placeholder="e.g. Table 5 / Shyam" required />
+      </div>
+      <div style="display: flex; gap: 10px;">
+        <button id="hold-modal-cancel" class="modal-btn" style="flex:1; background: var(--bg-hover);">Cancel</button>
+        <button id="hold-modal-save" class="modal-btn" style="flex:1;">Hold Bill</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Resume Order Modal -->
+  <div id="resume-modal" class="modal-overlay hidden">
+    <div class="modal-content" style="max-width: 500px;">
+      <h3 class="modal-title">Resume Held Orders</h3>
+      <div id="held-orders-list"
+        style="max-height: 300px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; margin: 15px 0;">
+      </div>
+      <button id="resume-modal-close" class="modal-btn" style="background: var(--bg-hover);">Close</button>
+    </div>
+  </div>
+
+  <!-- Item Notes Modal -->
+  <div id="item-notes-modal" class="modal-overlay hidden">
+    <div class="modal-content">
+      <h3 class="modal-title">Item Cooking Notes</h3>
+      <p id="notes-product-name" class="modal-desc" style="font-weight:600; color: var(--accent);"></p>
+      <div class="form-group">
+        <textarea id="item-notes-text" class="form-input" rows="3" placeholder="e.g. Extra spicy / No onions"
+          style="font-family:inherit; resize: none;"></textarea>
+      </div>
+      <div style="display: flex; gap: 10px;">
+        <button id="notes-modal-cancel" class="modal-btn" style="flex:1; background: var(--bg-hover);">Cancel</button>
+        <button id="notes-modal-save" class="modal-btn" style="flex:1;">Save Notes</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Tables Merge/Transfer Modal -->
+  <div id="tables-action-modal" class="modal-overlay hidden">
+    <div class="modal-content">
+      <h3 id="table-action-title" class="modal-title">Transfer Table</h3>
+      <div class="form-group" style="text-align: left;">
+        <label id="table-action-from-label" class="form-label">From Table</label>
+        <select id="table-action-from-select" class="form-input"></select>
+      </div>
+      <div class="form-group" style="text-align: left;">
+        <label id="table-action-to-label" class="form-label">To Table</label>
+        <select id="table-action-to-select" class="form-input"></select>
+      </div>
+      <div style="display: flex; gap: 10px; margin-top: 10px;">
+        <button id="table-action-cancel" class="modal-btn" style="flex:1; background: var(--bg-hover);">Cancel</button>
+        <button id="table-action-submit" class="modal-btn" style="flex:1;">Confirm</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Category Modal -->
+  <div id="category-modal" class="modal-overlay hidden">
+    <div class="modal-content">
+      <h3 id="category-modal-title" class="modal-title">Add Category</h3>
+      <div class="form-group" style="text-align: left;">
+        <label class="form-label">Category Name</label>
+        <input type="text" id="category-modal-name" class="form-input" required />
+      </div>
+      <div class="form-group" style="text-align: left;">
+        <label class="form-label">Description</label>
+        <input type="text" id="category-modal-desc" class="form-input" />
+      </div>
+      <div style="display: flex; gap: 10px; margin-top: 10px;">
+        <button id="category-modal-cancel" class="modal-btn"
+          style="flex:1; background: var(--bg-hover);">Cancel</button>
+        <button id="category-modal-save" class="modal-btn" style="flex:1;">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Product Modal -->
+  <div id="product-modal" class="modal-overlay hidden">
+    <div class="modal-content">
+      <h3 id="product-modal-title" class="modal-title">Add Product</h3>
+      <div class="form-group" style="text-align: left;">
+        <label class="form-label">Category</label>
+        <select id="product-modal-category" class="form-input" required></select>
+      </div>
+      <div class="form-group" style="text-align: left;">
+        <label class="form-label">Product Name</label>
+        <input type="text" id="product-modal-name" class="form-input" required />
+      </div>
+      <div class="form-group" style="text-align: left;">
+        <label class="form-label">Unit Price (₹)</label>
+        <input type="number" id="product-modal-price" step="0.01" min="0" class="form-input" required />
+      </div>
+      <div class="form-group" style="text-align: left;">
+        <label class="form-label">GST Tax Rate (%)</label>
+        <select id="product-modal-gst" class="form-input">
+          <option value="0">0% (Nil)</option>
+          <option value="5">5% (Cafe/Beverages)</option>
+          <option value="12">12% (Supplies)</option>
+          <option value="18">18% (Standard Restaurant)</option>
+        </select>
+      </div>
+      <div class="form-group" style="text-align: left; display: flex; align-items: center; gap: 8px;">
+        <input type="checkbox" id="product-modal-available" checked />
+        <label for="product-modal-available" class="form-label" style="margin: 0; cursor: pointer;">Available in
+          Menu</label>
+      </div>
+      <div style="display: flex; gap: 10px; margin-top: 10px;">
+        <button id="product-modal-cancel" class="modal-btn" style="flex:1; background: var(--bg-hover);">Cancel</button>
+        <button id="product-modal-save" class="modal-btn" style="flex:1;">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Log Purchase Inventory Modal -->
+  <div id="purchase-modal" class="modal-overlay hidden">
+    <div class="modal-content">
+      <h3 class="modal-title">Record Stock Purchase</h3>
+      <div class="form-group" style="text-align: left;">
+        <label class="form-label">Select Product</label>
+        <select id="purchase-modal-product" class="form-input" required></select>
+      </div>
+      <div class="form-group" style="text-align: left;">
+        <label class="form-label">Purchase Quantity</label>
+        <input type="number" id="purchase-modal-qty" min="1" class="form-input" required />
+      </div>
+      <div class="form-group" style="text-align: left;">
+        <label class="form-label">Supplier Name</label>
+        <input type="text" id="purchase-modal-supplier" class="form-input" placeholder="e.g. Metro Wholesale" />
+      </div>
+      <div class="form-group" style="text-align: left;">
+        <label class="form-label">Supplier Unit Cost (₹)</label>
+        <input type="number" id="purchase-modal-cost" step="0.01" min="0" class="form-input" required />
+      </div>
+      <div style="display: flex; gap: 10px; margin-top: 10px;">
+        <button id="purchase-modal-cancel" class="modal-btn"
+          style="flex:1; background: var(--bg-hover);">Cancel</button>
+        <button id="purchase-modal-save" class="modal-btn" style="flex:1;">Log Stock</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Customer Modal -->
+  <div id="customer-modal" class="modal-overlay hidden">
+    <div class="modal-content">
+      <h3 id="customer-modal-title" class="modal-title">Register Customer</h3>
+      <div class="form-group" style="text-align: left;">
+        <label class="form-label">Customer Name</label>
+        <input type="text" id="customer-modal-name" class="form-input" placeholder="e.g. Shyam Sundar" required />
+      </div>
+      <div class="form-group" style="text-align: left;">
+        <label class="form-label">Phone Number</label>
+        <input type="text" id="customer-modal-phone" class="form-input" placeholder="e.g. 9876543210" required />
+      </div>
+      <div class="form-group" style="text-align: left;">
+        <label class="form-label">Email (Optional)</label>
+        <input type="email" id="customer-modal-email" class="form-input" placeholder="e.g. customer@gmail.com" />
+      </div>
+      <div style="display: flex; gap: 10px; margin-top: 10px;">
+        <button id="customer-modal-cancel" class="modal-btn"
+          style="flex:1; background: var(--bg-hover);">Cancel</button>
+        <button id="customer-modal-save" class="modal-btn" style="flex:1;">Save Customer</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Advanced Checkout / Payment screen Modal -->
+  <div id="checkout-modal" class="modal-overlay hidden">
+    <div class="modal-content"
+      style="max-width: 820px; display: flex; flex-direction: row; gap: 20px; text-align: left; padding: 24px;">
+      <!-- Left Pane: Split Payment inputs -->
+      <div style="flex: 1.2; display: flex; flex-direction: column; gap: 16px;">
+        <h3 class="modal-title" style="margin:0;">Select Payment Details</h3>
+
+        <div
+          style="background: rgba(255,255,255,0.02); padding: 12px; border-radius: 8px; border: 1px solid var(--border);">
+          <div style="font-size:0.85rem; color: var(--text-secondary); margin-bottom: 4px;">TOTAL PAYABLE AMOUNT</div>
+          <div id="checkout-modal-amount" style="font-size: 1.8rem; font-weight:700; color: var(--accent);">₹0.00</div>
+        </div>
+
+        <div class="form-group" style="margin:0;">
+          <label class="form-label">Payment Mode</label>
+          <select id="checkout-payment-mode" class="form-input" style="padding: 10px;">
+            <option value="Cash">Cash payment</option>
+            <option value="UPI">UPI (QR Code)</option>
+            <option value="Card">Card Terminal</option>
+            <option value="Mixed">Mixed / Split Payment</option>
+          </select>
+        </div>
+
+        <!-- Split amounts block -->
+        <div id="checkout-split-block" class="hidden"
+          style="display: flex; flex-direction: column; gap: 10px; background: rgba(0,0,0,0.15); padding: 12px; border-radius: 8px; border: 1px solid var(--border);">
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <label class="form-label" style="margin: 0; font-size: 0.8rem;">Cash Portion (₹)</label>
+            <input type="number" id="split-cash-amount" class="form-input" style="width: 120px; padding: 6px;"
+              value="0" />
+          </div>
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <label class="form-label" style="margin: 0; font-size: 0.8rem;">UPI Portion (₹)</label>
+            <input type="number" id="split-upi-amount" class="form-input" style="width: 120px; padding: 6px;"
+              value="0" />
+          </div>
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <label class="form-label" style="margin: 0; font-size: 0.8rem;">Card Portion (₹)</label>
+            <input type="number" id="split-card-amount" class="form-input" style="width: 120px; padding: 6px;"
+              value="0" />
+          </div>
+          <div
+            style="display: flex; justify-content: space-between; font-size: 0.8rem; border-top: 1px solid var(--border); padding-top: 6px; margin-top: 4px;">
+            <span>Remaining to Split:</span>
+            <span id="split-remaining-total" style="font-weight:700; color: var(--danger);">₹0.00</span>
+          </div>
+        </div>
+
+        <!-- Cash change calculation -->
+        <div id="checkout-change-block" style="display: flex; justify-content: space-between; align-items: center;">
+          <label class="form-label" style="margin:0;">Received Cash Amount (₹)</label>
+          <input type="number" id="checkout-cash-received" class="form-input" style="width: 120px; padding: 8px;"
+            placeholder="₹0.00" />
+        </div>
+        <div id="checkout-change-row"
+          style="display: flex; justify-content: space-between; font-size:0.95rem; font-weight: 500;">
+          <span>Change Return:</span>
+          <span id="checkout-change-amount" style="color: var(--success);">₹0.00</span>
+        </div>
+
+        <div style="display: flex; gap: 10px; margin-top: auto;">
+          <button id="checkout-modal-cancel" class="modal-btn"
+            style="flex:1; background: var(--bg-hover);">Cancel</button>
+          <button id="checkout-modal-print" class="modal-btn" style="flex:1; background: var(--primary);">Print
+            Receipt</button>
+          <button id="checkout-modal-confirm" class="modal-btn"
+            style="flex:1; background: var(--success); color: white;">Finalize Bill</button>
+        </div>
+      </div>
+
+      <!-- Right Pane: Receipt Virtual thermal print preview -->
+      <div id="receipt-print-area"
+        style="width: 320px; background: white; color: black; border-radius: 8px; padding: 20px; box-shadow: inset 0 0 10px rgba(0,0,0,0.15); display: flex; flex-direction: column; font-family: monospace; font-size: 0.8rem; max-height: 480px; overflow-y: auto;">
+        <div style="text-align: center; border-bottom: 1px dashed black; padding-bottom: 10px; margin-bottom: 10px;">
+          <div id="receipt-store-name" style="font-weight:700; font-size: 1rem;">MEALDESK BISTRO</div>
+          <div id="receipt-store-address" style="font-size:0.7rem; color:#555;">123 Foodie St, Gourmet City</div>
+          <div id="receipt-store-phone" style="font-size:0.7rem;">Ph: +1234567890</div>
+          <div id="receipt-store-gstin" style="font-size:0.7rem;">GSTIN: 27AAAAA1111A1Z1</div>
+        </div>
+        <div
+          style="border-bottom: 1px dashed black; padding-bottom: 6px; margin-bottom: 6px; display: flex; flex-direction: column; gap: 2px; font-size: 0.72rem;">
+          <div style="display: flex; justify-content: space-between;">
+            <span>Bill No: <span id="receipt-bill-number">#1002</span></span>
+            <span id="receipt-date">26-Jul-2026</span>
+          </div>
+          <div style="display: flex; justify-content: space-between;">
+            <span>Table: <span id="receipt-table">Table 3</span></span>
+            <span>Cashier: <span id="receipt-cashier">Cashier</span></span>
+          </div>
+          <div id="receipt-customer-row" style="display: flex; justify-content: space-between;">
+            <span>Customer: <span id="receipt-customer">-</span></span>
+          </div>
+        </div>
+        <div style="border-bottom: 1px dashed black; padding-bottom: 6px; margin-bottom: 6px; flex: 1;">
+          <table style="width: 100%; text-align: left; font-size: 0.72rem; border-collapse: collapse;">
+            <thead>
+              <tr style="border-bottom: 1px solid black; font-weight:700;">
+                <th>Item</th>
+                <th style="text-align: center; width: 40px;">Qty</th>
+                <th style="text-align: right; width: 70px;">Amt</th>
+              </tr>
+            </thead>
+            <tbody id="receipt-items-body"></tbody>
+          </table>
+        </div>
+        <div
+          style="display: flex; flex-direction: column; gap: 4px; font-size: 0.72rem; border-bottom: 1px dashed black; padding-bottom: 6px; margin-bottom: 6px;">
+          <div style="display: flex; justify-content: space-between;">
+            <span>Subtotal</span>
+            <span id="receipt-subtotal">₹0.00</span>
+          </div>
+          <div style="display: flex; justify-content: space-between;">
+            <span>Discount</span>
+            <span id="receipt-discount">-₹0.00</span>
+          </div>
+          <div style="display: flex; justify-content: space-between;">
+            <span>Service Charge</span>
+            <span id="receipt-service">₹0.00</span>
+          </div>
+          <div style="display: flex; justify-content: space-between;">
+            <span>Taxes (CGST + SGST)</span>
+            <span id="receipt-tax">₹0.00</span>
+          </div>
+          <div
+            style="display: flex; justify-content: space-between; font-weight: 700; font-size: 0.85rem; border-top: 1px solid black; padding-top: 4px; margin-top: 2px;">
+            <span>NET PAYABLE</span>
+            <span id="receipt-total">₹0.00</span>
+          </div>
+        </div>
+        <div style="text-align: center; font-size: 0.7rem; margin-top: 10px;">
+          <div id="receipt-footer-msg">Thank you for dining with us!</div>
+          <div style="margin-top: 6px; font-size: 0.6rem; color:#666;">MealDesk POS - Offline Billing</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Success Modal popup -->
+  <div id="success-modal" class="modal-overlay hidden">
+    <div class="modal-content">
+      <div class="modal-success-icon">✓</div>
+      <h3 id="modal-title" class="modal-title">Payment Successful</h3>
+      <p id="modal-msg" class="modal-desc">Bill generated and printed successfully.</p>
+      <button id="modal-close-btn" class="modal-btn">Done</button>
+    </div>
+  </div>
+  <!-- Customer Order History Modal -->
+  <div id="customer-history-modal" class="modal-overlay hidden">
+    <div class="modal-content" style="max-width: 500px;">
+      <h3 class="modal-title">Customer Transactions History</h3>
+      <p id="cust-history-name" class="modal-desc" style="font-weight:600; color: var(--accent);"></p>
+      <div id="cust-history-list"
+        style="max-height: 300px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; margin: 15px 0;">
+      </div>
+      <button id="cust-history-close" class="modal-btn" style="background: var(--bg-hover);">Close</button>
+    </div>
+  </div>
+</body>
+
+</html>
