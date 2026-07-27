@@ -779,31 +779,49 @@ async function saveHoldBill() {
 
   try {
     if (activeOrderId) {
-      await invoke("cancel_order", { orderId: activeOrderId });
+      await invoke("update_order", {
+        orderId: activeOrderId,
+        tableId: tableIdVal,
+        customerId: custIdVal,
+        subtotal,
+        tax: finalTax,
+        discount: discountPercent,
+        serviceCharge: servicePercent,
+        roundOff,
+        total: finalTotal,
+        status: "Pending",
+        paymentMode: "None",
+        notes: "",
+        holdName: name,
+        items: orderItemsInput,
+        createdAt: new Date().toISOString()
+      });
+    } else {
+      await invoke("create_order", {
+        tableId: tableIdVal,
+        customerId: custIdVal,
+        subtotal,
+        tax: finalTax,
+        discount: discountPercent,
+        serviceCharge: servicePercent,
+        roundOff,
+        total: finalTotal,
+        status: "Pending",
+        paymentMode: "None",
+        notes: "",
+        holdName: name,
+        items: orderItemsInput,
+        createdAt: new Date().toISOString()
+      });
     }
-
-    await invoke("create_order", {
-      tableId: tableIdVal,
-      customerId: custIdVal,
-      subtotal,
-      tax: finalTax,
-      discount: discountPercent,
-      serviceCharge: servicePercent,
-      roundOff,
-      total: finalTotal,
-      status: "Pending",
-      paymentMode: "None",
-      notes: "",
-      holdName: name,
-      items: orderItemsInput,
-      createdAt: new Date().toISOString()
-    });
 
     holdModal.classList.add("hidden");
     cart = [];
     activeOrderId = null;
     cartTableSelect.value = "";
+    cartCustomerSelect.value = "";
     renderCart();
+    updateSelectColors();
 
     modalTitle.textContent = "Bill Placed on Hold";
     modalMsg.textContent = `Draft details saved successfully under name: ${name}`;
@@ -865,6 +883,7 @@ async function resumeOrder(orderId) {
     cartTableSelect.value = orderData.header.table_id || "";
 
     activeOrderId = orderId;
+    updateSelectColors();
     renderCart();
     
     resumeModal.classList.add("hidden");
@@ -1022,26 +1041,43 @@ async function finalizeTransaction() {
   }));
 
   try {
+    let finalOrderId = activeOrderId;
     if (activeOrderId) {
-      await invoke("cancel_order", { orderId: activeOrderId });
+      await invoke("update_order", {
+        orderId: activeOrderId,
+        tableId: tableIdVal,
+        customerId: custIdVal,
+        subtotal,
+        tax: finalTax,
+        discount: discountPercent,
+        serviceCharge: servicePercent,
+        roundOff,
+        total: finalTotal,
+        status: "Completed",
+        paymentMode: paymentMode,
+        notes: "",
+        holdName: "",
+        items: orderItemsInput,
+        createdAt: new Date().toISOString()
+      });
+    } else {
+      finalOrderId = await invoke("create_order", {
+        tableId: tableIdVal,
+        customerId: custIdVal,
+        subtotal,
+        tax: finalTax,
+        discount: discountPercent,
+        serviceCharge: servicePercent,
+        roundOff,
+        total: finalTotal,
+        status: "Completed",
+        paymentMode: paymentMode,
+        notes: "",
+        holdName: "",
+        items: orderItemsInput,
+        createdAt: new Date().toISOString()
+      });
     }
-
-    const finalOrderId = await invoke("create_order", {
-      tableId: tableIdVal,
-      customerId: custIdVal,
-      subtotal,
-      tax: finalTax,
-      discount: discountPercent,
-      serviceCharge: servicePercent,
-      roundOff,
-      total: finalTotal,
-      status: "Completed",
-      paymentMode: paymentMode,
-      notes: "",
-      holdName: "",
-      items: orderItemsInput,
-      createdAt: new Date().toISOString()
-    });
 
     // Check if printer is set to system, and trigger browser print dialog
     const printerMode = localStorage.getItem("printer_pref") || "simulated";
@@ -1053,7 +1089,9 @@ async function finalizeTransaction() {
     cart = [];
     activeOrderId = null;
     cartTableSelect.value = "";
+    cartCustomerSelect.value = "";
     renderCart();
+    updateSelectColors();
     
     await loadCustomers();
     
@@ -1095,6 +1133,7 @@ async function renderTables() {
           cart = [];
           activeOrderId = null;
           cartTableSelect.value = t.id;
+          updateSelectColors();
           renderCart();
           switchPanel("pos");
         }

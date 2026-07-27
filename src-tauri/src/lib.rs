@@ -364,6 +364,178 @@ fn create_order(
 }
 
 #[tauri::command]
+fn update_order(
+    order_id: i64,
+    table_id: Option<i64>,
+    customer_id: Option<i64>,
+    subtotal: f64,
+    tax: f64,
+    discount: f64,
+    service_charge: f64,
+    round_off: f64,
+    total: f64,
+    status: String,
+    payment_mode: Option<String>,
+    notes: Option<String>,
+    hold_name: Option<String>,
+    items: Vec<OrderItemInput>,
+    created_at: String,
+    state: tauri::State<'_, db::DbPathState>,
+) -> Result<(), String> {
+    let mut conn = rusqlite::Connection::open(&state.path).map_err(|e| e.to_string())?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+
+    // 1. Fetch old table_id for table state management later
+    let old_table_id: Option<i64> = tx.query_row(
+        "SELECT table_id FROM orders WHERE id = ?1",
+        [order_id],
+        |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+
+    // 2. Fetch existing items in this order
+    let mut old_items = std::collections::HashMap::new();
+    {
+        let mut stmt = tx.prepare(
+            "SELECT product_id, quantity FROM order_items WHERE order_id = ?1"
+        ).map_err(|e| e.to_string())?;
+        
+        let old_items_iter = stmt.query_map([order_id], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+        }).map_err(|e| e.to_string())?;
+
+        for item in old_items_iter {
+            let (product_id, qty) = item.map_err(|e| e.to_string())?;
+            old_items.insert(product_id, qty);
+        }
+    }
+
+    // 3. Determine new additions / changes and update stock and build incremental KOT items list
+    let mut kot_additions = Vec::new();
+    let mut processed_products = std::collections::HashSet::new();
+
+    for item in &items {
+        processed_products.insert(item.product_id);
+        if let Some(&old_qty) = old_items.get(&item.product_id) {
+            let diff = item.quantity - old_qty;
+            if diff > 0 {
+                // Quantity increased: send difference to kitchen
+                kot_additions.push(OrderItemInput {
+                    product_id: item.product_id,
+                    name: item.name.clone(),
+                    quantity: diff,
+                    price: item.price,
+                    gst_rate: item.gst_rate,
+                    notes: item.notes.clone(),
+                });
+                // Deduct diff from stock
+                tx.execute(
+                    "UPDATE inventory SET stock_qty = MAX(0, stock_qty - ?1) WHERE product_id = ?2",
+                    params![diff, item.product_id],
+                ).map_err(|e| e.to_string())?;
+            } else if diff < 0 {
+                // Quantity decreased: refund difference to stock
+                let refund = -diff;
+                tx.execute(
+                    "UPDATE inventory SET stock_qty = stock_qty + ?1 WHERE product_id = ?2",
+                    params![refund, item.product_id],
+                ).map_err(|e| e.to_string())?;
+            }
+        } else {
+            // Brand-new item: send full quantity to kitchen
+            kot_additions.push(item.clone());
+            // Deduct full quantity from stock
+            tx.execute(
+                "UPDATE inventory SET stock_qty = MAX(0, stock_qty - ?1) WHERE product_id = ?2",
+                params![item.quantity, item.product_id],
+            ).map_err(|e| e.to_string())?;
+        }
+    }
+
+    // 4. Refund stock for any items that were completely removed
+    for (&product_id, &old_qty) in &old_items {
+        if !processed_products.contains(&product_id) {
+            tx.execute(
+                "UPDATE inventory SET stock_qty = stock_qty + ?1 WHERE product_id = ?2",
+                params![old_qty, product_id],
+            ).map_err(|e| e.to_string())?;
+        }
+    }
+
+    // 5. Delete and replace items in order_items
+    tx.execute(
+        "DELETE FROM order_items WHERE order_id = ?1",
+        [order_id],
+    ).map_err(|e| e.to_string())?;
+
+    for item in &items {
+        tx.execute(
+            "INSERT INTO order_items (order_id, product_id, name, quantity, price, gst_rate, notes)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![order_id, item.product_id, item.name, item.quantity, item.price, item.gst_rate, item.notes],
+        ).map_err(|e| e.to_string())?;
+    }
+
+    // 6. Update orders table row
+    tx.execute(
+        "UPDATE orders 
+         SET table_id = ?1, customer_id = ?2, subtotal = ?3, tax = ?4, discount = ?5, service_charge = ?6, round_off = ?7, total = ?8, status = ?9, payment_mode = ?10, notes = ?11, hold_name = ?12
+         WHERE id = ?13",
+        params![table_id, customer_id, subtotal, tax, discount, service_charge, round_off, total, status, payment_mode, notes, hold_name, order_id],
+    ).map_err(|e| e.to_string())?;
+
+    // 7. Table Status Management
+    // Free the old table if it has changed or the order is finalized
+    if let Some(old_tid) = old_table_id {
+        if table_id != Some(old_tid) || status == "Completed" || status == "Cancelled" {
+            tx.execute(
+                "UPDATE tables SET status = 'Free', current_order_id = NULL WHERE id = ?1",
+                [old_tid],
+            ).map_err(|e| e.to_string())?;
+        }
+    }
+    
+    // Set status of new table if active and table exists
+    if let Some(tid) = table_id {
+        if status == "Pending" || status == "Billed" {
+            tx.execute(
+                "UPDATE tables SET status = 'Occupied', current_order_id = ?1 WHERE id = ?2",
+                params![order_id, tid],
+            ).map_err(|e| e.to_string())?;
+        }
+    }
+
+    // 8. Loyalty points award for completed order
+    if status == "Completed" {
+        if let Some(cid) = customer_id {
+            let pts_gained = (total / 100.0) as i64;
+            tx.execute(
+                "UPDATE customers SET loyalty_points = loyalty_points + ?1 WHERE id = ?2",
+                params![pts_gained, cid],
+            ).map_err(|e| e.to_string())?;
+        }
+    }
+
+    // 9. Generate incremental KOT only if there are new items to cook
+    if (status == "Pending" || status == "Billed") && !kot_additions.is_empty() {
+        tx.execute(
+            "INSERT INTO kot (order_id, status, created_at) VALUES (?1, 'Pending', ?2)",
+            params![order_id, created_at],
+        ).map_err(|e| e.to_string())?;
+        let kot_id = tx.last_insert_rowid();
+
+        for item in &kot_additions {
+            tx.execute(
+                "INSERT INTO kot_items (kot_id, product_id, quantity, notes) VALUES (?1, ?2, ?3, ?4)",
+                params![kot_id, item.product_id, item.quantity, item.notes],
+            ).map_err(|e| e.to_string())?;
+        }
+    }
+
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
 fn get_order(order_id: i64, state: tauri::State<'_, db::DbPathState>) -> Result<OrderOutput, String> {
     let conn = rusqlite::Connection::open(&state.path).map_err(|e| e.to_string())?;
     
@@ -1156,6 +1328,7 @@ pub fn run() {
             get_categories,
             get_products_by_category,
             create_order,
+            update_order,
             get_order,
             get_active_orders,
             complete_payment,
