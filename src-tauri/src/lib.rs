@@ -311,19 +311,21 @@ fn create_order(
             params![order_id, item.product_id, item.name, item.quantity, item.price, item.gst_rate, item.notes],
         ).map_err(|e| e.to_string())?;
         
-        tx.execute(
-            "UPDATE inventory SET stock_qty = MAX(0, stock_qty - ?1) WHERE product_id = ?2",
-            params![item.quantity, item.product_id],
-        ).map_err(|e| e.to_string())?;
+        if status != "Draft" {
+            tx.execute(
+                "UPDATE inventory SET stock_qty = MAX(0, stock_qty - ?1) WHERE product_id = ?2",
+                params![item.quantity, item.product_id],
+            ).map_err(|e| e.to_string())?;
+        }
     }
     
     if let Some(tid) = table_id {
-        let table_status = if status == "Pending" || status == "Billed" {
+        let table_status = if status == "Draft" || status == "Pending" || status == "Billed" {
             "Occupied"
         } else {
             "Free"
         };
-        let current_order = if status == "Pending" || status == "Billed" {
+        let current_order = if status == "Draft" || status == "Pending" || status == "Billed" {
             Some(order_id)
         } else {
             None
@@ -344,7 +346,7 @@ fn create_order(
         }
     }
     
-    if status == "Pending" || status == "Billed" {
+    if status == "Pending" || status == "Billed" || (status == "Completed" && table_id.is_none()) {
         tx.execute(
             "INSERT INTO kot (order_id, status, created_at) VALUES (?1, 'Pending', ?2)",
             params![order_id, created_at],
@@ -385,11 +387,11 @@ fn update_order(
     let mut conn = rusqlite::Connection::open(&state.path).map_err(|e| e.to_string())?;
     let tx = conn.transaction().map_err(|e| e.to_string())?;
 
-    // 1. Fetch old table_id for table state management later
-    let old_table_id: Option<i64> = tx.query_row(
-        "SELECT table_id FROM orders WHERE id = ?1",
+    // 1. Fetch old table_id and old_status for state management later
+    let (old_table_id, old_status): (Option<i64>, String) = tx.query_row(
+        "SELECT table_id, status FROM orders WHERE id = ?1",
         [order_id],
-        |row| row.get(0),
+        |row| Ok((row.get(0)?, row.get(1)?)),
     ).map_err(|e| e.to_string())?;
 
     // 2. Fetch existing items in this order
@@ -413,51 +415,122 @@ fn update_order(
     let mut kot_additions = Vec::new();
     let mut processed_products = std::collections::HashSet::new();
 
-    for item in &items {
-        processed_products.insert(item.product_id);
-        if let Some(&old_qty) = old_items.get(&item.product_id) {
-            let diff = item.quantity - old_qty;
-            if diff > 0 {
-                // Quantity increased: send difference to kitchen
-                kot_additions.push(OrderItemInput {
-                    product_id: item.product_id,
-                    name: item.name.clone(),
-                    quantity: diff,
-                    price: item.price,
-                    gst_rate: item.gst_rate,
-                    notes: item.notes.clone(),
-                });
-                // Deduct diff from stock
-                tx.execute(
-                    "UPDATE inventory SET stock_qty = MAX(0, stock_qty - ?1) WHERE product_id = ?2",
-                    params![diff, item.product_id],
-                ).map_err(|e| e.to_string())?;
-            } else if diff < 0 {
-                // Quantity decreased: refund difference to stock
-                let refund = -diff;
+    if old_status == "Draft" {
+        // Transition: Draft -> Draft
+        if status == "Draft" {
+            // No stock changes, no KOT.
+        } else {
+            // Transition: Draft -> Pending / Billed / Completed / Cancelled
+            if status != "Cancelled" {
+                // Deduct full quantity from stock for all new items
+                for item in &items {
+                    tx.execute(
+                        "UPDATE inventory SET stock_qty = MAX(0, stock_qty - ?1) WHERE product_id = ?2",
+                        params![item.quantity, item.product_id],
+                    ).map_err(|e| e.to_string())?;
+                    
+                    // If transitioning to active state (Pending/Billed) OR direct Completed Counter order (no table_id), send to kitchen
+                    if status == "Pending" || status == "Billed" || (status == "Completed" && table_id.is_none()) {
+                        kot_additions.push(item.clone());
+                    }
+                }
+            }
+        }
+    } else {
+        // Transition from an active state (Pending / Billed / Completed / Cancelled)
+        if status == "Draft" {
+            // Transition: Active -> Draft
+            // Refund all old items back to stock
+            for (&product_id, &old_qty) in &old_items {
                 tx.execute(
                     "UPDATE inventory SET stock_qty = stock_qty + ?1 WHERE product_id = ?2",
-                    params![refund, item.product_id],
+                    params![old_qty, product_id],
+                ).map_err(|e| e.to_string())?;
+            }
+            // No KOT.
+        } else if status == "Cancelled" {
+            // Transition: Active -> Cancelled
+            // Refund all old items back to stock
+            for (&product_id, &old_qty) in &old_items {
+                tx.execute(
+                    "UPDATE inventory SET stock_qty = stock_qty + ?1 WHERE product_id = ?2",
+                    params![old_qty, product_id],
                 ).map_err(|e| e.to_string())?;
             }
         } else {
-            // Brand-new item: send full quantity to kitchen
-            kot_additions.push(item.clone());
-            // Deduct full quantity from stock
-            tx.execute(
-                "UPDATE inventory SET stock_qty = MAX(0, stock_qty - ?1) WHERE product_id = ?2",
-                params![item.quantity, item.product_id],
-            ).map_err(|e| e.to_string())?;
-        }
-    }
+            // Transition: Active -> Active (Pending / Billed / Completed)
+            for item in &items {
+                processed_products.insert(item.product_id);
+                if let Some(&old_qty) = old_items.get(&item.product_id) {
+                    let diff = item.quantity - old_qty;
+                    if diff > 0 {
+                        // Quantity increased: send difference to kitchen
+                        kot_additions.push(OrderItemInput {
+                            product_id: item.product_id,
+                            name: item.name.clone(),
+                            quantity: diff,
+                            price: item.price,
+                            gst_rate: item.gst_rate,
+                            notes: item.notes.clone(),
+                        });
+                        // Deduct diff from stock
+                        tx.execute(
+                            "UPDATE inventory SET stock_qty = MAX(0, stock_qty - ?1) WHERE product_id = ?2",
+                            params![diff, item.product_id],
+                        ).map_err(|e| e.to_string())?;
+                    } else if diff < 0 {
+                        // Quantity decreased: send cancellation (negative quantity) to kitchen
+                        kot_additions.push(OrderItemInput {
+                            product_id: item.product_id,
+                            name: item.name.clone(),
+                            quantity: diff,
+                            price: item.price,
+                            gst_rate: item.gst_rate,
+                            notes: item.notes.clone(),
+                        });
+                        // Refund difference to stock
+                        let refund = -diff;
+                        tx.execute(
+                            "UPDATE inventory SET stock_qty = stock_qty + ?1 WHERE product_id = ?2",
+                            params![refund, item.product_id],
+                        ).map_err(|e| e.to_string())?;
+                    }
+                } else {
+                    // Brand-new item added to active order: send full quantity to kitchen
+                    kot_additions.push(item.clone());
+                    // Deduct full quantity from stock
+                    tx.execute(
+                        "UPDATE inventory SET stock_qty = MAX(0, stock_qty - ?1) WHERE product_id = ?2",
+                        params![item.quantity, item.product_id],
+                    ).map_err(|e| e.to_string())?;
+                }
+            }
 
-    // 4. Refund stock for any items that were completely removed
-    for (&product_id, &old_qty) in &old_items {
-        if !processed_products.contains(&product_id) {
-            tx.execute(
-                "UPDATE inventory SET stock_qty = stock_qty + ?1 WHERE product_id = ?2",
-                params![old_qty, product_id],
-            ).map_err(|e| e.to_string())?;
+            // Refund stock and generate cancellation KOT for any items completely removed
+            for (&product_id, &old_qty) in &old_items {
+                if !processed_products.contains(&product_id) {
+                    // Fetch product name for KOT slip
+                    let prod_name: String = tx.query_row(
+                        "SELECT name FROM products WHERE id = ?1",
+                        [product_id],
+                        |row| row.get(0),
+                    ).unwrap_or_else(|_| "Removed Product".to_string());
+
+                    kot_additions.push(OrderItemInput {
+                        product_id,
+                        name: prod_name,
+                        quantity: -old_qty,
+                        price: 0.0,
+                        gst_rate: 0.0,
+                        notes: Some("Item removed from order".to_string()),
+                    });
+
+                    tx.execute(
+                        "UPDATE inventory SET stock_qty = stock_qty + ?1 WHERE product_id = ?2",
+                        params![old_qty, product_id],
+                    ).map_err(|e| e.to_string())?;
+                }
+            }
         }
     }
 
@@ -496,7 +569,7 @@ fn update_order(
     
     // Set status of new table if active and table exists
     if let Some(tid) = table_id {
-        if status == "Pending" || status == "Billed" {
+        if status == "Draft" || status == "Pending" || status == "Billed" {
             tx.execute(
                 "UPDATE tables SET status = 'Occupied', current_order_id = ?1 WHERE id = ?2",
                 params![order_id, tid],
@@ -515,8 +588,8 @@ fn update_order(
         }
     }
 
-    // 9. Generate incremental KOT only if there are new items to cook
-    if (status == "Pending" || status == "Billed") && !kot_additions.is_empty() {
+    // 9. Generate incremental KOT only if there are items to cook/cancel
+    if (status == "Pending" || status == "Billed" || (status == "Completed" && table_id.is_none())) && !kot_additions.is_empty() {
         tx.execute(
             "INSERT INTO kot (order_id, status, created_at) VALUES (?1, 'Pending', ?2)",
             params![order_id, created_at],
@@ -597,7 +670,7 @@ fn get_active_orders(state: tauri::State<'_, db::DbPathState>) -> Result<Vec<Ord
          FROM orders o 
          LEFT JOIN tables t ON o.table_id = t.id 
          LEFT JOIN customers c ON o.customer_id = c.id
-         WHERE o.status IN ('Pending', 'Billed')
+         WHERE o.status IN ('Draft', 'Pending', 'Billed')
          ORDER BY o.id DESC"
     ).map_err(|e| e.to_string())?;
     
@@ -677,14 +750,15 @@ fn cancel_order(order_id: i64, state: tauri::State<'_, db::DbPathState>) -> Resu
     let mut conn = rusqlite::Connection::open(&state.path).map_err(|e| e.to_string())?;
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     
-    let table_id: Option<i64> = tx.query_row(
-        "SELECT table_id FROM orders WHERE id = ?1",
+    // Fetch table_id and current status
+    let (table_id, current_status): (Option<i64>, String) = tx.query_row(
+        "SELECT table_id, status FROM orders WHERE id = ?1",
         [order_id],
-        |row| row.get(0),
+        |row| Ok((row.get(0)?, row.get(1)?)),
     ).map_err(|e| e.to_string())?;
     
-    // Refund stock count
-    {
+    // Refund stock count ONLY if status is NOT 'Draft'
+    if current_status != "Draft" {
         let mut stmt = tx.prepare("SELECT product_id, quantity FROM order_items WHERE order_id = ?1").map_err(|e| e.to_string())?;
         let items_iter = stmt.query_map([order_id], |row| {
             Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))

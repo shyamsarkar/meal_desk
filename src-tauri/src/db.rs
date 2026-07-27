@@ -23,9 +23,87 @@ pub fn init_db(app_handle: &AppHandle) -> Result<PathBuf, String> {
     let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
     
     create_tables(&conn)?;
+    migrate_db(&conn)?;
     seed_default_data(&conn)?;
     
     Ok(db_path)
+}
+
+fn migrate_db(conn: &Connection) -> Result<(), String> {
+    // 1. Check if database is in a broken state from a previous partial/incorrect migration (referencing orders_old)
+    let is_broken: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE sql LIKE '%orders_old%'",
+        [],
+        |row| row.get(0),
+    ).unwrap_or(0);
+
+    if is_broken > 0 {
+        // Drop all tables to trigger a clean recreate
+        let tables_to_drop = [
+            "kot_items", "kot", "order_items", "orders", "inventory", 
+            "purchase_history", "products", "categories", "customers", 
+            "tables", "users", "restaurant_info"
+        ];
+        conn.execute("PRAGMA foreign_keys = OFF;", []).map_err(|e| e.to_string())?;
+        for table in &tables_to_drop {
+            let _ = conn.execute(&format!("DROP TABLE IF EXISTS {};", table), []);
+        }
+        conn.execute("PRAGMA foreign_keys = ON;", []).map_err(|e| e.to_string())?;
+        
+        // Recreate tables and seed data immediately
+        create_tables(conn)?;
+        seed_default_data(conn)?;
+        return Ok(());
+    }
+
+    // 2. Correct schema migration logic
+    let sql: String = conn.query_row(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'orders'",
+        [],
+        |row| row.get(0),
+    ).unwrap_or_default();
+
+    if !sql.is_empty() && !sql.contains("'Draft'") {
+        // Run migration using the safe SQLite table recreation template
+        conn.execute("PRAGMA foreign_keys = OFF;", []).map_err(|e| e.to_string())?;
+
+        // Create the new orders_new table with updated constraint
+        conn.execute(
+            "CREATE TABLE orders_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                table_id INTEGER REFERENCES tables(id) ON DELETE SET NULL,
+                customer_id INTEGER REFERENCES customers(id) ON DELETE SET NULL,
+                subtotal REAL NOT NULL,
+                tax REAL NOT NULL,
+                discount REAL NOT NULL DEFAULT 0.0,
+                service_charge REAL NOT NULL DEFAULT 0.0,
+                round_off REAL NOT NULL DEFAULT 0.0,
+                total REAL NOT NULL,
+                status TEXT NOT NULL CHECK (status IN ('Draft', 'Pending', 'Billed', 'Completed', 'Cancelled')),
+                payment_mode TEXT CHECK (payment_mode IN ('Cash', 'UPI', 'Card', 'Mixed', 'None')),
+                notes TEXT,
+                hold_name TEXT,
+                created_at TEXT NOT NULL
+            );",
+            [],
+        ).map_err(|e| e.to_string())?;
+
+        // Copy records from orders to orders_new
+        conn.execute(
+            "INSERT INTO orders_new (id, table_id, customer_id, subtotal, tax, discount, service_charge, round_off, total, status, payment_mode, notes, hold_name, created_at)
+             SELECT id, table_id, customer_id, subtotal, tax, discount, service_charge, round_off, total, status, payment_mode, notes, hold_name, created_at FROM orders;",
+            [],
+        ).map_err(|e| e.to_string())?;
+
+        // Drop the old orders table
+        conn.execute("DROP TABLE orders;", []).map_err(|e| e.to_string())?;
+
+        // Rename orders_new to orders
+        conn.execute("ALTER TABLE orders_new RENAME TO orders;", []).map_err(|e| e.to_string())?;
+
+        conn.execute("PRAGMA foreign_keys = ON;", []).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 fn create_tables(conn: &Connection) -> Result<(), String> {
@@ -112,7 +190,7 @@ fn create_tables(conn: &Connection) -> Result<(), String> {
             service_charge REAL NOT NULL DEFAULT 0.0,
             round_off REAL NOT NULL DEFAULT 0.0,
             total REAL NOT NULL,
-            status TEXT NOT NULL CHECK (status IN ('Pending', 'Billed', 'Completed', 'Cancelled')),
+            status TEXT NOT NULL CHECK (status IN ('Draft', 'Pending', 'Billed', 'Completed', 'Cancelled')),
             payment_mode TEXT CHECK (payment_mode IN ('Cash', 'UPI', 'Card', 'Mixed', 'None')),
             notes TEXT,
             hold_name TEXT,

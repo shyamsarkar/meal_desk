@@ -789,7 +789,7 @@ async function saveHoldBill() {
         serviceCharge: servicePercent,
         roundOff,
         total: finalTotal,
-        status: "Pending",
+        status: "Draft",
         paymentMode: "None",
         notes: "",
         holdName: name,
@@ -806,7 +806,7 @@ async function saveHoldBill() {
         serviceCharge: servicePercent,
         roundOff,
         total: finalTotal,
-        status: "Pending",
+        status: "Draft",
         paymentMode: "None",
         notes: "",
         holdName: name,
@@ -836,7 +836,7 @@ async function loadHeldOrders() {
     const orders = await invoke("get_active_orders");
     heldOrdersList.innerHTML = "";
 
-    const held = orders.filter(o => o.status === "Pending");
+    const held = orders.filter(o => o.status === "Draft");
     if (held.length === 0) {
       heldOrdersList.innerHTML = `<span style="text-align: center; color:var(--text-muted); padding: 20px 0;">No held orders found</span>`;
     } else {
@@ -1228,9 +1228,12 @@ async function loadKots() {
       
       let itemsHtml = "";
       kot.items.forEach(it => {
+        const isCancelled = it.quantity < 0;
+        const qtyDisplay = isCancelled ? Math.abs(it.quantity) : it.quantity;
+        const nameDisplay = isCancelled ? `<del style="color: var(--danger); text-decoration: line-through;">${it.product_name} (CANCELLED)</del>` : it.product_name;
         itemsHtml += `
-          <div class="kot-item-row">
-            <span class="kot-item-qty-name">${it.quantity} x ${it.product_name}</span>
+          <div class="kot-item-row" style="${isCancelled ? 'background-color: rgba(239, 68, 68, 0.08); padding: 4px; border-radius: 4px;' : ''}">
+            <span class="kot-item-qty-name" style="${isCancelled ? 'color: var(--danger);' : ''}">${qtyDisplay} x ${nameDisplay}</span>
           </div>
           ${it.notes ? `<div class="kot-item-notes">Notes: ${it.notes}</div>` : ""}
         `;
