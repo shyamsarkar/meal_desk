@@ -59,6 +59,12 @@ let checkoutModal, checkoutModalAmount, checkoutPaymentMode, checkoutSplitBlock,
 let splitCashAmount, splitUpiAmount, splitCardAmount, splitRemainingTotal;
 let receiptStoreName, receiptStoreAddress, receiptStorePhone, receiptStoreGstin, receiptBillNumber, receiptDate, receiptTable, receiptCashier, receiptCustomerRow, receiptCustomer, receiptItemsBody, receiptSubtotal, receiptDiscount, receiptService, receiptTax, receiptTotal, receiptFooterMsg;
 
+// Cancellation Modal
+let cancelModal, cancelModalTitle, cancelModalItemName, cancelAuthSection, cancelAuthUsername, cancelAuthPassword;
+let cancelQtyGroup, cancelQtyInput, cancelReasonSelect, cancelReasonTextGroup, cancelReasonText, cancelModalCancelBtn, cancelModalSubmitBtn;
+let cancelOrderBtn;
+let activeCancellationTarget = null; // { type: 'item'|'order', itemIndex: number, orderItem: object }
+
 // Entry
 window.addEventListener("DOMContentLoaded", () => {
   initDOMElements();
@@ -250,6 +256,22 @@ function initDOMElements() {
   receiptTax = document.getElementById("receipt-tax");
   receiptTotal = document.getElementById("receipt-total");
   receiptFooterMsg = document.getElementById("receipt-footer-msg");
+
+  // Cancellation Modal
+  cancelModal = document.getElementById("cancel-modal");
+  cancelModalTitle = document.getElementById("cancel-modal-title");
+  cancelModalItemName = document.getElementById("cancel-modal-item-name");
+  cancelAuthSection = document.getElementById("cancel-auth-section");
+  cancelAuthUsername = document.getElementById("cancel-auth-username");
+  cancelAuthPassword = document.getElementById("cancel-auth-password");
+  cancelQtyGroup = document.getElementById("cancel-qty-group");
+  cancelQtyInput = document.getElementById("cancel-qty-input");
+  cancelReasonSelect = document.getElementById("cancel-reason-select");
+  cancelReasonTextGroup = document.getElementById("cancel-reason-text-group");
+  cancelReasonText = document.getElementById("cancel-reason-text");
+  cancelModalCancelBtn = document.getElementById("cancel-modal-cancel-btn");
+  cancelModalSubmitBtn = document.getElementById("cancel-modal-submit-btn");
+  cancelOrderBtn = document.getElementById("cancel-order-btn");
 }
 
 function setupEventListeners() {
@@ -311,6 +333,26 @@ function setupEventListeners() {
   checkoutCashReceived.addEventListener("input", calculateChangeAmount);
   checkoutModalPrint.addEventListener("click", () => window.print());
   checkoutModalConfirm.addEventListener("click", finalizeTransaction);
+
+  // KOT button listener
+  document.getElementById("kot-btn").addEventListener("click", sendKot);
+
+  // Cancellation Event Listeners
+  cancelOrderBtn.addEventListener("click", () => openCancellationModal({ type: 'order' }));
+  cancelModalCancelBtn.addEventListener("click", () => cancelModal.classList.add("hidden"));
+  cancelReasonSelect.addEventListener("change", () => {
+    if (cancelReasonSelect.value === "Other") {
+      cancelReasonTextGroup.classList.remove("hidden");
+      cancelReasonText.required = true;
+    } else {
+      cancelReasonTextGroup.classList.add("hidden");
+      cancelReasonText.required = false;
+    }
+  });
+  cancelModalSubmitBtn.addEventListener("click", submitCancellation);
+
+  // Set default printing layout class
+  document.body.classList.add("print-receipt-mode");
 
   [splitCashAmount, splitUpiAmount, splitCardAmount].forEach(input => {
     input.addEventListener("input", calculateSplitPortions);
@@ -651,7 +693,8 @@ function filterProducts() {
 }
 
 function addToCart(product) {
-  const existing = cart.find(item => item.product.id === product.id);
+  // Find editable item of same product (where kot_id is null/undefined)
+  const existing = cart.find(item => item.product.id === product.id && !item.kot_id);
   if (existing) {
     existing.quantity += 1;
   } else {
@@ -665,7 +708,7 @@ function addToCart(product) {
 }
 
 function updateCartQty(productId, change) {
-  const idx = cart.findIndex(item => item.product.id === productId);
+  const idx = cart.findIndex(item => item.product.id === productId && !item.kot_id);
   if (idx === -1) return;
 
   cart[idx].quantity += change;
@@ -675,7 +718,18 @@ function updateCartQty(productId, change) {
   renderCart();
 }
 
+function updateCartHeaderButtons() {
+  if (activeOrderId) {
+    cancelOrderBtn.classList.remove("hidden");
+    clearCartBtn.classList.add("hidden");
+  } else {
+    cancelOrderBtn.classList.add("hidden");
+    clearCartBtn.classList.remove("hidden");
+  }
+}
+
 function renderCart() {
+  updateCartHeaderButtons();
   cartItemsList.innerHTML = "";
   if (cart.length === 0) {
     cartItemsList.innerHTML = `
@@ -697,26 +751,60 @@ function renderCart() {
   const servicePercent = parseFloat(cartServiceInput.value) || 0;
 
   cart.forEach((item, index) => {
-    const itemSubtotal = item.product.price * item.quantity;
+    const effectiveQty = item.quantity - (item.cancelled_quantity || 0);
+    const itemSubtotal = item.product.price * effectiveQty;
     const itemTax = itemSubtotal * (item.product.gst_rate / 100);
     
     subtotal += itemSubtotal;
     totalTax += itemTax;
 
     const div = document.createElement("div");
-    div.className = "cart-item";
-    div.innerHTML = `
-      <div class="cart-item-details" style="cursor: pointer;">
-        <div class="cart-item-name">${item.product.name}</div>
-        <div class="cart-item-price">₹${item.product.price.toFixed(2)} x ${item.quantity}</div>
-        ${item.notes ? `<div style="font-size:0.75rem; color:var(--warning); font-style:italic;">📝 ${item.notes}</div>` : ""}
-      </div>
-      <div class="cart-item-control">
-        <button class="qty-btn minus">-</button>
-        <span class="cart-item-qty">${item.quantity}</span>
-        <button class="qty-btn plus">+</button>
-      </div>
-    `;
+    if (item.kot_id) {
+      // Locked item
+      div.className = "cart-item locked";
+      div.innerHTML = `
+        <div class="cart-item-details" style="cursor: pointer;">
+          <div class="cart-item-name" style="font-weight: 600;">
+            ${item.product.name} <span class="badge locked-badge" style="background: var(--bg-hover); font-size: 0.7rem; padding: 2px 6px; border-radius: 4px; color: var(--accent);">KOT #${item.kot_id}</span>
+          </div>
+          <div class="cart-item-price">
+            ₹${item.product.price.toFixed(2)} x ${effectiveQty}
+            ${item.cancelled_quantity > 0 ? `<span class="cancelled-text" style="color: var(--danger); font-size: 0.8rem; margin-left: 5px;">(Cancelled ${item.cancelled_quantity})</span>` : ''}
+          </div>
+          ${item.notes ? `<div style="font-size:0.75rem; color:var(--warning); font-style:italic;">📝 ${item.notes}</div>` : ""}
+        </div>
+        <div class="cart-item-control">
+          ${effectiveQty > 0 
+            ? `<button class="qty-btn cancel-btn" style="background: rgba(239, 68, 68, 0.1); color: var(--danger); border-color: rgba(239, 68, 68, 0.2); width: auto; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem;" data-index="${index}">Cancel</button>` 
+            : `<span class="cancelled-label" style="color: var(--danger); font-size: 0.75rem; font-weight: bold;">Fully Cancelled</span>`}
+        </div>
+      `;
+      
+      const cancelBtn = div.querySelector(".cancel-btn");
+      if (cancelBtn) {
+        cancelBtn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          openCancellationModal({ type: 'item', itemIndex: index });
+        });
+      }
+    } else {
+      // Unlocked (editable) item
+      div.className = "cart-item";
+      div.innerHTML = `
+        <div class="cart-item-details" style="cursor: pointer;">
+          <div class="cart-item-name">${item.product.name}</div>
+          <div class="cart-item-price">₹${item.product.price.toFixed(2)} x ${item.quantity}</div>
+          ${item.notes ? `<div style="font-size:0.75rem; color:var(--warning); font-style:italic;">📝 ${item.notes}</div>` : ""}
+        </div>
+        <div class="cart-item-control">
+          <button class="qty-btn minus">-</button>
+          <span class="cart-item-qty">${item.quantity}</span>
+          <button class="qty-btn plus">+</button>
+        </div>
+      `;
+      div.querySelector(".minus").addEventListener("click", () => updateCartQty(item.product.id, -1));
+      div.querySelector(".plus").addEventListener("click", () => updateCartQty(item.product.id, 1));
+    }
 
     div.querySelector(".cart-item-details").addEventListener("click", () => {
       activeNotesItemIndex = index;
@@ -725,8 +813,6 @@ function renderCart() {
       itemNotesModal.classList.remove("hidden");
     });
 
-    div.querySelector(".minus").addEventListener("click", () => updateCartQty(item.product.id, -1));
-    div.querySelector(".plus").addEventListener("click", () => updateCartQty(item.product.id, 1));
     cartItemsList.appendChild(div);
   });
 
@@ -769,6 +855,7 @@ async function saveHoldBill() {
   const custIdVal = cartCustomerSelect.value ? parseInt(cartCustomerSelect.value) : null;
 
   const orderItemsInput = cart.map(item => ({
+    id: item.id || null,
     product_id: item.product.id,
     name: item.product.name,
     quantity: item.quantity,
@@ -794,7 +881,8 @@ async function saveHoldBill() {
         notes: "",
         holdName: name,
         items: orderItemsInput,
-        createdAt: new Date().toISOString()
+        createdAt: new Date().toISOString(),
+        username: currentUser.username
       });
     } else {
       await invoke("create_order", {
@@ -811,7 +899,8 @@ async function saveHoldBill() {
         notes: "",
         holdName: name,
         items: orderItemsInput,
-        createdAt: new Date().toISOString()
+        createdAt: new Date().toISOString(),
+        username: currentUser.username
       });
     }
 
@@ -866,6 +955,7 @@ async function resumeOrder(orderId) {
     const orderData = await invoke("get_order", { orderId });
     
     cart = orderData.items.map(it => ({
+      id: it.id,
       product: {
         id: it.product_id,
         name: it.name,
@@ -874,7 +964,9 @@ async function resumeOrder(orderId) {
         is_available: true
       },
       quantity: it.quantity,
-      notes: it.notes || ""
+      cancelled_quantity: it.cancelled_quantity,
+      notes: it.notes || "",
+      kot_id: it.kot_id
     }));
 
     cartDiscountInput.value = orderData.header.discount;
@@ -894,80 +986,115 @@ async function resumeOrder(orderId) {
 
 // Checkout Screens
 function openCheckoutScreen() {
-  if (cart.length === 0) return;
+  try {
+    if (cart.length === 0) return;
 
-  const subtotal = parseFloat(cartSubtotalEl.textContent.replace('₹','')) || 0;
-  const discountPercent = parseFloat(cartDiscountInput.value) || 0;
-  const servicePercent = parseFloat(cartServiceInput.value) || 0;
-  const discountAmount = subtotal * (discountPercent / 100);
-  const serviceAmount = subtotal * (servicePercent / 100);
-  const finalTax = parseFloat(cartTaxEl.textContent.replace('₹','')) || 0;
-  const finalTotal = parseFloat(cartTotalEl.textContent.replace('₹','')) || 0;
+    const subtotal = parseFloat(cartSubtotalEl.textContent.replace('₹','')) || 0;
+    const discountPercent = parseFloat(cartDiscountInput.value) || 0;
+    const servicePercent = parseFloat(cartServiceInput.value) || 0;
+    const discountAmount = subtotal * (discountPercent / 100);
+    const serviceAmount = subtotal * (servicePercent / 100);
+    const finalTax = parseFloat(cartTaxEl.textContent.replace('₹','')) || 0;
+    const finalTotal = parseFloat(cartTotalEl.textContent.replace('₹','')) || 0;
 
-  // Modals inputs reset
-  checkoutModalAmount.textContent = `₹${finalTotal.toFixed(2)}`;
-  checkoutPaymentMode.value = "Cash";
-  checkoutCashReceived.value = "";
-  checkoutChangeAmount.textContent = "₹0.00";
-  checkoutSplitBlock.classList.add("hidden");
-  checkoutChangeBlock.classList.remove("hidden");
-  checkoutChangeRow.classList.remove("hidden");
-  checkoutModalConfirm.disabled = false;
+    // Modals inputs reset
+    checkoutModalAmount.textContent = `₹${finalTotal.toFixed(2)}`;
+    checkoutPaymentMode.value = "Cash";
+    checkoutCashReceived.value = "";
+    checkoutChangeAmount.textContent = "₹0.00";
+    checkoutSplitBlock.classList.add("hidden");
+    checkoutChangeBlock.classList.remove("hidden");
+    checkoutChangeRow.classList.remove("hidden");
+    checkoutModalConfirm.disabled = false;
 
-  splitCashAmount.value = 0;
-  splitUpiAmount.value = 0;
-  splitCardAmount.value = 0;
-  splitRemainingTotal.textContent = `₹${finalTotal.toFixed(2)}`;
+    splitCashAmount.value = 0;
+    splitUpiAmount.value = 0;
+    splitCardAmount.value = 0;
+    splitRemainingTotal.textContent = `₹${finalTotal.toFixed(2)}`;
 
-  // Print templates
-  receiptStoreName.textContent = restaurantInfo.name.toUpperCase();
-  receiptStoreAddress.textContent = restaurantInfo.address || "";
-  receiptStorePhone.textContent = restaurantInfo.phone ? `Ph: ${restaurantInfo.phone}` : "";
-  receiptStoreGstin.textContent = restaurantInfo.gstin ? `GSTIN: ${restaurantInfo.gstin}` : "";
-  receiptBillNumber.textContent = activeOrderId ? `#${activeOrderId}` : "New Bill";
-  
-  const now = new Date();
-  receiptDate.textContent = now.toLocaleDateString([], { day: '2-digit', month: 'short', year: 'numeric' }) + " " + now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  
-  const activeTableOpt = cartTableSelect.options[cartTableSelect.selectedIndex];
-  receiptTable.textContent = activeTableOpt ? activeTableOpt.text : "No Table";
-  receiptCashier.textContent = currentUser.username;
+    // Print templates
+    receiptStoreName.textContent = (restaurantInfo && restaurantInfo.name) ? restaurantInfo.name.toUpperCase() : "MEALDESK BISTRO";
+    receiptStoreAddress.textContent = (restaurantInfo && restaurantInfo.address) ? restaurantInfo.address : "";
+    receiptStorePhone.textContent = (restaurantInfo && restaurantInfo.phone) ? `Ph: ${restaurantInfo.phone}` : "";
+    receiptStoreGstin.textContent = (restaurantInfo && restaurantInfo.gstin) ? `GSTIN: ${restaurantInfo.gstin}` : "";
+    receiptBillNumber.textContent = activeOrderId ? `#${activeOrderId}` : "New Bill";
+    
+    const now = new Date();
+    receiptDate.textContent = now.toLocaleDateString([], { day: '2-digit', month: 'short', year: 'numeric' }) + " " + now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    
+    const activeTableOpt = cartTableSelect.options[cartTableSelect.selectedIndex];
+    receiptTable.textContent = activeTableOpt ? activeTableOpt.text : "No Table";
+    receiptCashier.textContent = currentUser ? currentUser.username : "Cashier";
 
-  const activeCustOpt = cartCustomerSelect.options[cartCustomerSelect.selectedIndex];
-  if (activeCustOpt && cartCustomerSelect.value) {
-    receiptCustomerRow.classList.remove("hidden");
-    receiptCustomer.textContent = activeCustOpt.text;
-  } else {
-    receiptCustomerRow.classList.add("hidden");
+    const activeCustOpt = cartCustomerSelect.options[cartCustomerSelect.selectedIndex];
+    if (activeCustOpt && cartCustomerSelect.value) {
+      receiptCustomerRow.classList.remove("hidden");
+      receiptCustomer.textContent = activeCustOpt.text;
+    } else {
+      receiptCustomerRow.classList.add("hidden");
+    }
+
+    // Table details
+    receiptItemsBody.innerHTML = "";
+    
+    const consolidated = {};
+    cart.forEach(item => {
+      const effectiveQty = item.quantity - (item.cancelled_quantity || 0);
+      if (effectiveQty <= 0) return;
+      
+      const pid = item.product.id;
+      if (!consolidated[pid]) {
+        consolidated[pid] = {
+          name: item.product.name,
+          price: item.product.price,
+          quantity: 0,
+          notes: []
+        };
+      }
+      consolidated[pid].quantity += effectiveQty;
+      if (item.notes) {
+        consolidated[pid].notes.push(item.notes);
+      }
+    });
+
+    Object.values(consolidated).forEach(item => {
+      const tr = document.createElement("tr");
+      const notesStr = item.notes.length > 0 ? `<div style="font-size:0.6rem; color:#777; font-style:italic;">* ${item.notes.join(', ')}</div>` : "";
+      tr.innerHTML = `
+        <td style="padding: 4px 0;">
+          ${item.name}
+          ${notesStr}
+        </td>
+        <td style="text-align: center; padding: 4px 0;">${item.quantity}</td>
+        <td style="text-align: right; padding: 4px 0;">₹${(item.price * item.quantity).toFixed(2)}</td>
+      `;
+      receiptItemsBody.appendChild(tr);
+    });
+
+    receiptSubtotal.textContent = `₹${subtotal.toFixed(2)}`;
+    receiptDiscount.textContent = `-₹${discountAmount.toFixed(2)}`;
+    receiptService.textContent = `₹${serviceAmount.toFixed(2)}`;
+    receiptTax.textContent = `₹${finalTax.toFixed(2)}`;
+    receiptTotal.textContent = `₹${finalTotal.toFixed(2)}`;
+    receiptFooterMsg.textContent = (restaurantInfo && restaurantInfo.receipt_footer) ? restaurantInfo.receipt_footer : "Thank you for dining with us!";
+
+    checkoutModal.classList.remove("hidden");
+  } catch (err) {
+    alert("Error opening checkout screen: " + err + "\n" + err.stack);
+    console.error(err);
   }
-
-  // Table details
-  receiptItemsBody.innerHTML = "";
-  cart.forEach(item => {
-    const tr = document.createElement("tr");
-    tr.innerHTML = `
-      <td style="padding: 4px 0;">
-        ${item.product.name}
-        ${item.notes ? `<div style="font-size:0.6rem; color:#777; font-style:italic;">* ${item.notes}</div>` : ""}
-      </td>
-      <td style="text-align: center; padding: 4px 0;">${item.quantity}</td>
-      <td style="text-align: right; padding: 4px 0;">₹${(item.product.price * item.quantity).toFixed(2)}</td>
-    `;
-    receiptItemsBody.appendChild(tr);
-  });
-
-  receiptSubtotal.textContent = `₹${subtotal.toFixed(2)}`;
-  receiptDiscount.textContent = `-₹${discountAmount.toFixed(2)}`;
-  receiptService.textContent = `₹${serviceAmount.toFixed(2)}`;
-  receiptTax.textContent = `₹${finalTax.toFixed(2)}`;
-  receiptTotal.textContent = `₹${finalTotal.toFixed(2)}`;
-  receiptFooterMsg.textContent = restaurantInfo.receipt_footer || "Thank you for dining with us!";
-
-  checkoutModal.classList.remove("hidden");
 }
 
 function handlePaymentModeChange() {
   const mode = checkoutPaymentMode.value;
+  const originalTotal = parseFloat(cartTotalEl.textContent.replace('₹','')) || 0;
+
+  if (mode === "NC") {
+    receiptTotal.textContent = "₹0.00";
+  } else {
+    receiptTotal.textContent = `₹${originalTotal.toFixed(2)}`;
+  }
+
   if (mode === "Mixed") {
     checkoutSplitBlock.classList.remove("hidden");
     checkoutChangeBlock.classList.add("hidden");
@@ -1025,13 +1152,16 @@ async function finalizeTransaction() {
   const discountAmount = subtotal * (discountPercent / 100);
   const serviceAmount = subtotal * (servicePercent / 100);
   const finalTax = parseFloat(cartTaxEl.textContent.replace('₹','')) || 0;
-  const finalTotal = parseFloat(cartTotalEl.textContent.replace('₹','')) || 0;
-  const roundOff = finalTotal - (subtotal - discountAmount + serviceAmount + finalTax);
+  
+  const isNC = paymentMode === "NC";
+  const finalTotal = isNC ? 0.0 : (parseFloat(cartTotalEl.textContent.replace('₹','')) || 0);
+  const roundOff = isNC ? -(subtotal - discountAmount + serviceAmount + finalTax) : (finalTotal - (subtotal - discountAmount + serviceAmount + finalTax));
 
   const tableIdVal = cartTableSelect.value ? parseInt(cartTableSelect.value) : null;
   const custIdVal = cartCustomerSelect.value ? parseInt(cartCustomerSelect.value) : null;
 
   const orderItemsInput = cart.map(item => ({
+    id: item.id || null,
     product_id: item.product.id,
     name: item.product.name,
     quantity: item.quantity,
@@ -1058,7 +1188,8 @@ async function finalizeTransaction() {
         notes: "",
         holdName: "",
         items: orderItemsInput,
-        createdAt: new Date().toISOString()
+        createdAt: new Date().toISOString(),
+        username: currentUser.username
       });
     } else {
       finalOrderId = await invoke("create_order", {
@@ -1075,7 +1206,8 @@ async function finalizeTransaction() {
         notes: "",
         holdName: "",
         items: orderItemsInput,
-        createdAt: new Date().toISOString()
+        createdAt: new Date().toISOString(),
+        username: currentUser.username
       });
     }
 
@@ -1191,11 +1323,11 @@ async function submitTableAction() {
 
   try {
     if (activeTableActionType === "transfer") {
-      await invoke("transfer_table", { fromTableId: fromId, toTableId: toId });
+      await invoke("transfer_table", { fromTableId: fromId, toTableId: toId, username: currentUser.username });
       tablesActionModal.classList.add("hidden");
       renderTables();
     } else {
-      await invoke("merge_tables", { sourceTableId: fromId, targetTableId: toId });
+      await invoke("merge_tables", { sourceTableId: fromId, targetTableId: toId, username: currentUser.username });
       tablesActionModal.classList.add("hidden");
       renderTables();
     }
@@ -1241,12 +1373,15 @@ async function loadKots() {
 
       let btnHtml = "";
       if (kot.status === "Pending") {
-        btnHtml = `<button class="kot-btn prepare">Start Preparing</button>`;
+        btnHtml = `<button class="kot-btn prepare" style="flex: 1;">Start Preparing</button>`;
       } else if (kot.status === "Preparing") {
-        btnHtml = `<button class="kot-btn ready">Mark Ready</button>`;
+        btnHtml = `<button class="kot-btn ready" style="flex: 1;">Mark Ready</button>`;
       } else if (kot.status === "Ready") {
-        btnHtml = `<button class="kot-btn complete">Complete KOT</button>`;
+        btnHtml = `<button class="kot-btn complete" style="flex: 1;">Complete KOT</button>`;
       }
+      
+      // Add KOT print button in the actions row
+      btnHtml += `<button class="kot-btn print-kot-action-btn" style="background: var(--bg-hover); max-width: 50px; flex: 0 0 50px;" title="Print KOT">🖨️</button>`;
 
       card.innerHTML = `
         <div class="kot-header">
@@ -1257,9 +1392,14 @@ async function loadKots() {
         <div class="kot-actions">${btnHtml}</div>
       `;
 
-      const actionBtn = card.querySelector(".kot-btn");
+      const actionBtn = card.querySelector(".kot-btn:not(.print-kot-action-btn)");
       if (actionBtn) {
         actionBtn.addEventListener("click", () => advanceKotState(kot.id, kot.status));
+      }
+
+      const printBtn = card.querySelector(".print-kot-action-btn");
+      if (printBtn) {
+        printBtn.addEventListener("click", () => printKotById(kot.id));
       }
 
       kitchenKotGrid.appendChild(card);
@@ -1275,7 +1415,7 @@ async function advanceKotState(kotId, currentStatus) {
   else if (currentStatus === "Preparing") nextStatus = "Ready";
   
   try {
-    await invoke("update_kot_status", { kotId, status: nextStatus });
+    await invoke("update_kot_status", { kotId, status: nextStatus, username: currentUser.username });
     loadKots();
   } catch (err) {
     alert("Error updating KOT status: " + err);
@@ -1800,5 +1940,302 @@ async function saveSettings(e) {
     successModal.classList.remove("hidden");
   } catch (err) {
     alert("Error saving settings configuration: " + err);
+  }
+}
+
+// 9. Send KOT & Print KOT Features
+async function sendKot() {
+  if (cart.length === 0) return;
+
+  const subtotal = parseFloat(cartSubtotalEl.textContent.replace('₹','')) || 0;
+  const discountPercent = parseFloat(cartDiscountInput.value) || 0;
+  const servicePercent = parseFloat(cartServiceInput.value) || 0;
+  const discountAmount = subtotal * (discountPercent / 100);
+  const serviceAmount = subtotal * (servicePercent / 100);
+  const finalTax = parseFloat(cartTaxEl.textContent.replace('₹','')) || 0;
+  const finalTotal = parseFloat(cartTotalEl.textContent.replace('₹','')) || 0;
+  const roundOff = finalTotal - (subtotal - discountAmount + serviceAmount + finalTax);
+
+  const tableIdVal = cartTableSelect.value ? parseInt(cartTableSelect.value) : null;
+  const custIdVal = cartCustomerSelect.value ? parseInt(cartCustomerSelect.value) : null;
+
+  let name = "";
+  if (tableIdVal) {
+    name = cartTableSelect.options[cartTableSelect.selectedIndex].text;
+  } else {
+    name = "Takeaway";
+  }
+
+  const orderItemsInput = cart.map(item => ({
+    id: item.id || null,
+    product_id: item.product.id,
+    name: item.product.name,
+    quantity: item.quantity,
+    price: item.product.price,
+    gst_rate: item.product.gst_rate,
+    notes: item.notes || null
+  }));
+
+  try {
+    let orderId = activeOrderId;
+    if (activeOrderId) {
+      await invoke("update_order", {
+        orderId: activeOrderId,
+        tableId: tableIdVal,
+        customerId: custIdVal,
+        subtotal,
+        tax: finalTax,
+        discount: discountPercent,
+        serviceCharge: servicePercent,
+        roundOff,
+        total: finalTotal,
+        status: "Pending",
+        paymentMode: "None",
+        notes: "",
+        holdName: name,
+        items: orderItemsInput,
+        createdAt: new Date().toISOString(),
+        username: currentUser.username
+      });
+    } else {
+      orderId = await invoke("create_order", {
+        tableId: tableIdVal,
+        customerId: custIdVal,
+        subtotal,
+        tax: finalTax,
+        discount: discountPercent,
+        serviceCharge: servicePercent,
+        roundOff,
+        total: finalTotal,
+        status: "Pending",
+        paymentMode: "None",
+        notes: "",
+        holdName: name,
+        items: orderItemsInput,
+        createdAt: new Date().toISOString(),
+        username: currentUser.username
+      });
+    }
+
+    // Print the generated KOT
+    const kots = await invoke("get_kots_for_order", { orderId: orderId || activeOrderId });
+    if (kots && kots.length > 0) {
+      const pendingKots = kots.filter(k => k.print_count === 0);
+      if (pendingKots.length > 0) {
+        await printKot(pendingKots[pendingKots.length - 1]);
+      } else {
+        await printKot(kots[kots.length - 1]);
+      }
+    }
+
+    // Reset cart UI
+    cart = [];
+    activeOrderId = null;
+    cartTableSelect.value = "";
+    cartCustomerSelect.value = "";
+    renderCart();
+    updateSelectColors();
+
+    modalTitle.textContent = "KOT Sent to Kitchen";
+    modalMsg.textContent = `Order #${orderId || activeOrderId} saved as Pending and sent to kitchen successfully.`;
+    successModal.classList.remove("hidden");
+
+    loadKots();
+    renderTables();
+  } catch (err) {
+    alert("Error sending KOT: " + err);
+  }
+}
+
+async function printKot(kot) {
+  try {
+    const newCount = await invoke("increment_kot_print_count", { kotId: kot.id, username: currentUser.username });
+    kot.print_count = newCount;
+  } catch (err) {
+    console.error("Error updating print count in backend: ", err);
+  }
+
+  // Populate print layout
+  document.getElementById("kot-print-title").textContent = `KOT #${kot.id}`;
+  document.getElementById("kot-print-copy").textContent = `Print Copy: #${kot.print_count}`;
+  document.getElementById("kot-print-table").textContent = `Table: ${kot.table_name || 'No Table'}`;
+  
+  const dateObj = new Date(kot.created_at);
+  document.getElementById("kot-print-date").textContent = `Date/Time: ${dateObj.toLocaleDateString()} ${dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+
+  const itemsBody = document.getElementById("kot-print-items-body");
+  itemsBody.innerHTML = "";
+  
+  kot.items.forEach(it => {
+    const isCancelled = it.quantity < 0;
+    const qty = Math.abs(it.quantity);
+    const name = isCancelled ? `${it.product_name} (CANCELLED)` : it.product_name;
+    
+    const tr = document.createElement("tr");
+    tr.style.borderBottom = "1px dashed #eee";
+    tr.innerHTML = `
+      <td style="padding: 6px 0; font-weight: ${isCancelled ? 'normal' : 'bold'}; text-decoration: ${isCancelled ? 'line-through' : 'none'}; color: ${isCancelled ? '#777' : 'black'};">
+        ${name}
+        ${it.notes ? `<div style="font-size:0.75rem; font-weight:normal; font-style:italic; color:#555; margin-top:2px;">* Notes: ${it.notes}</div>` : ""}
+      </td>
+      <td style="text-align: center; padding: 6px 0; font-weight: bold; color: ${isCancelled ? '#777' : 'black'};">${qty}</td>
+    `;
+    itemsBody.appendChild(tr);
+  });
+
+  // Switch print mode
+  document.body.classList.remove("print-receipt-mode");
+  document.body.classList.add("print-kot-mode");
+
+  // Trigger system print dialog
+  window.print();
+
+  // Reset print mode
+  document.body.classList.remove("print-kot-mode");
+  document.body.classList.add("print-receipt-mode");
+  
+  // Reload KOT displays
+  loadKots();
+}
+
+async function printKotById(kotId) {
+  try {
+    const kot = await invoke("get_kot_by_id", { kotId });
+    await printKot(kot);
+  } catch (err) {
+    alert("Error fetching KOT for printing: " + err);
+  }
+}
+
+function openCancellationModal(target) {
+  activeCancellationTarget = target;
+  
+  // Reset form
+  cancelReasonSelect.value = "Customer requested cancellation";
+  cancelReasonText.value = "";
+  cancelReasonTextGroup.classList.add("hidden");
+  cancelReasonText.required = false;
+  
+  cancelAuthUsername.value = "";
+  cancelAuthPassword.value = "";
+  
+  // Authorization visibility
+  if (currentUser.role.toLowerCase() === 'cashier') {
+    cancelAuthSection.classList.remove("hidden");
+    cancelAuthUsername.required = true;
+    cancelAuthPassword.required = true;
+  } else {
+    cancelAuthSection.classList.add("hidden");
+    cancelAuthUsername.required = false;
+    cancelAuthPassword.required = false;
+  }
+  
+  if (target.type === 'item') {
+    const item = cart[target.itemIndex];
+    cancelModalTitle.textContent = "Cancel Item";
+    cancelModalItemName.textContent = `${item.product.name} (KOT #${item.kot_id})`;
+    cancelQtyGroup.classList.remove("hidden");
+    
+    const maxQty = item.quantity - (item.cancelled_quantity || 0);
+    cancelQtyInput.value = maxQty;
+    cancelQtyInput.max = maxQty;
+    cancelQtyInput.min = 1;
+  } else {
+    cancelModalTitle.textContent = "Cancel Entire Order";
+    cancelModalItemName.textContent = `Order #${activeOrderId}`;
+    cancelQtyGroup.classList.add("hidden");
+  }
+  
+  cancelModal.classList.remove("hidden");
+}
+
+async function submitCancellation() {
+  let reason = cancelReasonSelect.value;
+  if (reason === "Other") {
+    reason = cancelReasonText.value.trim();
+    if (!reason) {
+      alert("Please specify the cancellation reason.");
+      return;
+    }
+  }
+  
+  let authorizer = currentUser.username;
+  if (currentUser.role.toLowerCase() === 'cashier') {
+    const authUser = cancelAuthUsername.value.trim();
+    const authPass = cancelAuthPassword.value.trim();
+    if (!authUser || !authPass) {
+      alert("Manager/Owner approval credentials are required.");
+      return;
+    }
+    
+    try {
+      const isValid = await invoke("verify_credentials", {
+        username: authUser,
+        password: authPass,
+        requiredRoles: ["Owner", "Manager"]
+      });
+      if (!isValid) {
+        alert("Invalid credentials or insufficient permissions. Authorization denied.");
+        return;
+      }
+      authorizer = authUser;
+    } catch (err) {
+      alert("Authorization error: " + err);
+      return;
+    }
+  }
+  
+  try {
+    if (activeCancellationTarget.type === 'item') {
+      const item = cart[activeCancellationTarget.itemIndex];
+      const qty = parseInt(cancelQtyInput.value);
+      const maxQty = item.quantity - (item.cancelled_quantity || 0);
+      if (isNaN(qty) || qty < 1 || qty > maxQty) {
+        alert(`Invalid cancellation quantity. Must be between 1 and ${maxQty}.`);
+        return;
+      }
+      
+      await invoke("cancel_order_item", {
+        orderItemId: item.id,
+        quantityToCancel: qty,
+        cancelledBy: authorizer,
+        reason: reason
+      });
+      
+      cancelModal.classList.add("hidden");
+      
+      await resumeOrder(activeOrderId);
+      loadKots();
+      renderTables();
+      
+      modalTitle.textContent = "Item Cancelled";
+      modalMsg.textContent = `${qty} x ${item.product.name} cancelled successfully and sent to kitchen monitor.`;
+      successModal.classList.remove("hidden");
+    } else {
+      const cancelledOrderId = activeOrderId;
+      await invoke("cancel_order", {
+        orderId: activeOrderId,
+        cancelledBy: authorizer,
+        reason: reason
+      });
+      
+      cancelModal.classList.add("hidden");
+      
+      cart = [];
+      activeOrderId = null;
+      cartTableSelect.value = "";
+      cartCustomerSelect.value = "";
+      renderCart();
+      updateSelectColors();
+      
+      loadKots();
+      renderTables();
+      
+      modalTitle.textContent = "Order Cancelled";
+      modalMsg.textContent = `Order #${cancelledOrderId} has been cancelled successfully.`;
+      successModal.classList.remove("hidden");
+    }
+  } catch (err) {
+    alert("Cancellation error: " + err);
   }
 }

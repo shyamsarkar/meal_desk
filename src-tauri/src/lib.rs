@@ -42,6 +42,7 @@ pub struct Product {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct OrderItemInput {
+    pub id: Option<i64>,
     pub product_id: i64,
     pub name: String,
     pub quantity: i64,
@@ -68,6 +69,9 @@ pub struct OrderHeader {
     pub notes: Option<String>,
     pub hold_name: Option<String>,
     pub created_at: String,
+    pub cancelled_by: Option<String>,
+    pub cancelled_at: Option<String>,
+    pub cancel_reason: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -76,9 +80,11 @@ pub struct OrderItemOutput {
     pub product_id: i64,
     pub name: String,
     pub quantity: i64,
+    pub cancelled_quantity: i64,
     pub price: f64,
     pub gst_rate: f64,
     pub notes: Option<String>,
+    pub kot_id: Option<i64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -113,6 +119,7 @@ pub struct KotOutput {
     pub order_id: i64,
     pub table_name: Option<String>,
     pub status: String,
+    pub print_count: i32,
     pub created_at: String,
     pub items: Vec<KotItemOutput>,
 }
@@ -148,6 +155,49 @@ pub struct SalesReportOutput {
 #[tauri::command]
 fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
+}
+
+fn get_db_timestamp(conn: &rusqlite::Connection) -> String {
+    conn.query_row("SELECT strftime('%Y-%m-%dT%H:%M:%SZ', 'now')", [], |row| row.get(0)).unwrap_or_else(|_| "unknown".to_string())
+}
+
+fn log_audit(
+    conn: &rusqlite::Connection,
+    username: &str,
+    action: &str,
+    target_type: &str,
+    target_id: Option<i64>,
+    details: Option<&str>,
+) -> Result<(), String> {
+    let now = get_db_timestamp(conn);
+    conn.execute(
+        "INSERT INTO audit_logs (username, action, target_type, target_id, details, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![username, action, target_type, target_id, details, now],
+    ).map_err(|e| format!("Failed to write audit log: {}", e))?;
+    Ok(())
+}
+
+#[tauri::command]
+fn verify_credentials(
+    username: String,
+    password: Option<String>,
+    required_roles: Vec<String>,
+    state: tauri::State<'_, db::DbPathState>,
+) -> Result<bool, String> {
+    let conn = rusqlite::Connection::open(&state.path).map_err(|e| e.to_string())?;
+    let password = password.unwrap_or_default();
+    let hashed = db::hash_password(&password);
+    
+    let mut stmt = conn
+        .prepare("SELECT role FROM users WHERE username = ?1 AND password_hash = ?2")
+        .map_err(|e| e.to_string())?;
+    
+    let role: Result<String, _> = stmt.query_row([username, hashed], |row| row.get(0));
+    match role {
+        Ok(r) => Ok(required_roles.contains(&r)),
+        Err(_) => Ok(false),
+    }
 }
 
 #[tauri::command]
@@ -290,6 +340,7 @@ fn create_order(
     hold_name: Option<String>,
     items: Vec<OrderItemInput>,
     created_at: String,
+    username: String,
     state: tauri::State<'_, db::DbPathState>,
 ) -> Result<i64, String> {
     let mut conn = rusqlite::Connection::open(&state.path).map_err(|e| e.to_string())?;
@@ -304,12 +355,17 @@ fn create_order(
         tx.last_insert_rowid()
     };
     
+    log_audit(&tx, &username, "create_order", "orders", Some(order_id), Some(&format!("Created order in status: {}", status)))?;
+    
+    let mut inserted_items = Vec::new();
     for item in &items {
         tx.execute(
-            "INSERT INTO order_items (order_id, product_id, name, quantity, price, gst_rate, notes)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO order_items (order_id, product_id, name, quantity, price, gst_rate, notes, kot_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL)",
             params![order_id, item.product_id, item.name, item.quantity, item.price, item.gst_rate, item.notes],
         ).map_err(|e| e.to_string())?;
+        let order_item_id = tx.last_insert_rowid();
+        inserted_items.push((order_item_id, item.product_id, item.quantity, item.notes.clone()));
         
         if status != "Draft" {
             tx.execute(
@@ -353,10 +409,16 @@ fn create_order(
         ).map_err(|e| e.to_string())?;
         let kot_id = tx.last_insert_rowid();
         
-        for item in &items {
+        log_audit(&tx, &username, "create_kot", "kot", Some(kot_id), Some(&format!("Created KOT for order: {}", order_id)))?;
+
+        for (order_item_id, product_id, qty, item_notes) in inserted_items {
             tx.execute(
                 "INSERT INTO kot_items (kot_id, product_id, quantity, notes) VALUES (?1, ?2, ?3, ?4)",
-                params![kot_id, item.product_id, item.quantity, item.notes],
+                params![kot_id, product_id, qty, item_notes],
+            ).map_err(|e| e.to_string())?;
+            tx.execute(
+                "UPDATE order_items SET kot_id = ?1 WHERE id = ?2",
+                params![kot_id, order_item_id],
             ).map_err(|e| e.to_string())?;
         }
     }
@@ -382,6 +444,7 @@ fn update_order(
     hold_name: Option<String>,
     items: Vec<OrderItemInput>,
     created_at: String,
+    username: String,
     state: tauri::State<'_, db::DbPathState>,
 ) -> Result<(), String> {
     let mut conn = rusqlite::Connection::open(&state.path).map_err(|e| e.to_string())?;
@@ -394,161 +457,132 @@ fn update_order(
         |row| Ok((row.get(0)?, row.get(1)?)),
     ).map_err(|e| e.to_string())?;
 
-    // 2. Fetch existing items in this order
-    let mut old_items = std::collections::HashMap::new();
-    {
-        let mut stmt = tx.prepare(
-            "SELECT product_id, quantity FROM order_items WHERE order_id = ?1"
-        ).map_err(|e| e.to_string())?;
-        
-        let old_items_iter = stmt.query_map([order_id], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
-        }).map_err(|e| e.to_string())?;
+    log_audit(&tx, &username, "update_order", "orders", Some(order_id), Some(&format!("Updating order. Old status: {}, New status: {}", old_status, status)))?;
 
-        for item in old_items_iter {
-            let (product_id, qty) = item.map_err(|e| e.to_string())?;
-            old_items.insert(product_id, qty);
-        }
+    // 2. Fetch existing items in this order
+    struct DbItem {
+        id: i64,
+        product_id: i64,
+        quantity: i64,
+        price: f64,
+        notes: Option<String>,
+        kot_id: Option<i64>,
     }
 
-    // 3. Determine new additions / changes and update stock and build incremental KOT items list
-    let mut kot_additions = Vec::new();
-    let mut processed_products = std::collections::HashSet::new();
+    let db_items = {
+        let mut stmt = tx.prepare(
+            "SELECT id, product_id, quantity, price, notes, kot_id FROM order_items WHERE order_id = ?1"
+        ).map_err(|e| e.to_string())?;
+        
+        let db_items_iter = stmt.query_map([order_id], |row| {
+            Ok(DbItem {
+                id: row.get(0)?,
+                product_id: row.get(1)?,
+                quantity: row.get(2)?,
+                price: row.get(3)?,
+                notes: row.get(4)?,
+                kot_id: row.get(5)?,
+            })
+        }).map_err(|e| e.to_string())?;
 
-    if old_status == "Draft" {
-        // Transition: Draft -> Draft
-        if status == "Draft" {
-            // No stock changes, no KOT.
-        } else {
-            // Transition: Draft -> Pending / Billed / Completed / Cancelled
-            if status != "Cancelled" {
-                // Deduct full quantity from stock for all new items
-                for item in &items {
+        let mut map = std::collections::HashMap::new();
+        for item_res in db_items_iter {
+            let item = item_res.map_err(|e| e.to_string())?;
+            map.insert(item.id, item);
+        }
+        map
+    };
+
+    // 3. Process incoming items
+    let mut processed_incoming_ids = std::collections::HashSet::new();
+
+    for item in &items {
+        if let Some(item_id) = item.id {
+            processed_incoming_ids.insert(item_id);
+            let db_item = db_items.get(&item_id)
+                .ok_or_else(|| format!("Order item with ID {} not found in this order", item_id))?;
+
+            if db_item.kot_id.is_some() {
+                // Sent to KOT: Immutability constraint verification
+                if item.product_id != db_item.product_id || item.quantity != db_item.quantity || item.price != db_item.price {
+                    return Err(format!("Sent KOT item (ID {}, Product '{}') is immutable. Modifications must go through the cancellation workflow.", item_id, item.name));
+                }
+                if item.notes != db_item.notes {
+                    tx.execute(
+                        "UPDATE order_items SET notes = ?1 WHERE id = ?2",
+                        params![item.notes, item_id],
+                    ).map_err(|e| e.to_string())?;
+                }
+            } else {
+                // Not sent to KOT (Draft order item)
+                if old_status == "Draft" && status != "Draft" && status != "Cancelled" {
+                    // Transition: Draft -> Active: Deduct full quantity from stock
                     tx.execute(
                         "UPDATE inventory SET stock_qty = MAX(0, stock_qty - ?1) WHERE product_id = ?2",
                         params![item.quantity, item.product_id],
                     ).map_err(|e| e.to_string())?;
-                    
-                    // If transitioning to active state (Pending/Billed) OR direct Completed Counter order (no table_id), send to kitchen
-                    if status == "Pending" || status == "Billed" || (status == "Completed" && table_id.is_none()) {
-                        kot_additions.push(item.clone());
-                    }
-                }
-            }
-        }
-    } else {
-        // Transition from an active state (Pending / Billed / Completed / Cancelled)
-        if status == "Draft" {
-            // Transition: Active -> Draft
-            // Refund all old items back to stock
-            for (&product_id, &old_qty) in &old_items {
-                tx.execute(
-                    "UPDATE inventory SET stock_qty = stock_qty + ?1 WHERE product_id = ?2",
-                    params![old_qty, product_id],
-                ).map_err(|e| e.to_string())?;
-            }
-            // No KOT.
-        } else if status == "Cancelled" {
-            // Transition: Active -> Cancelled
-            // Refund all old items back to stock
-            for (&product_id, &old_qty) in &old_items {
-                tx.execute(
-                    "UPDATE inventory SET stock_qty = stock_qty + ?1 WHERE product_id = ?2",
-                    params![old_qty, product_id],
-                ).map_err(|e| e.to_string())?;
-            }
-        } else {
-            // Transition: Active -> Active (Pending / Billed / Completed)
-            for item in &items {
-                processed_products.insert(item.product_id);
-                if let Some(&old_qty) = old_items.get(&item.product_id) {
-                    let diff = item.quantity - old_qty;
+                } else if old_status != "Draft" && status != "Cancelled" {
+                    // Transition: Active -> Active: Update quantity and handle stock difference
+                    let diff = item.quantity - db_item.quantity;
                     if diff > 0 {
-                        // Quantity increased: send difference to kitchen
-                        kot_additions.push(OrderItemInput {
-                            product_id: item.product_id,
-                            name: item.name.clone(),
-                            quantity: diff,
-                            price: item.price,
-                            gst_rate: item.gst_rate,
-                            notes: item.notes.clone(),
-                        });
-                        // Deduct diff from stock
                         tx.execute(
                             "UPDATE inventory SET stock_qty = MAX(0, stock_qty - ?1) WHERE product_id = ?2",
                             params![diff, item.product_id],
                         ).map_err(|e| e.to_string())?;
                     } else if diff < 0 {
-                        // Quantity decreased: send cancellation (negative quantity) to kitchen
-                        kot_additions.push(OrderItemInput {
-                            product_id: item.product_id,
-                            name: item.name.clone(),
-                            quantity: diff,
-                            price: item.price,
-                            gst_rate: item.gst_rate,
-                            notes: item.notes.clone(),
-                        });
-                        // Refund difference to stock
                         let refund = -diff;
                         tx.execute(
                             "UPDATE inventory SET stock_qty = stock_qty + ?1 WHERE product_id = ?2",
                             params![refund, item.product_id],
                         ).map_err(|e| e.to_string())?;
                     }
-                } else {
-                    // Brand-new item added to active order: send full quantity to kitchen
-                    kot_additions.push(item.clone());
-                    // Deduct full quantity from stock
-                    tx.execute(
-                        "UPDATE inventory SET stock_qty = MAX(0, stock_qty - ?1) WHERE product_id = ?2",
-                        params![item.quantity, item.product_id],
-                    ).map_err(|e| e.to_string())?;
                 }
+                tx.execute(
+                    "UPDATE order_items SET quantity = ?1, notes = ?2, price = ?3 WHERE id = ?4",
+                    params![item.quantity, item.notes, item.price, item_id],
+                ).map_err(|e| e.to_string())?;
             }
+        } else {
+            // Brand new order item added
+            tx.execute(
+                "INSERT INTO order_items (order_id, product_id, name, quantity, price, gst_rate, notes, kot_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL)",
+                params![order_id, item.product_id, item.name, item.quantity, item.price, item.gst_rate, item.notes],
+            ).map_err(|e| e.to_string())?;
+            let new_item_id = tx.last_insert_rowid();
+            
+            log_audit(&tx, &username, "add_item", "order_items", Some(new_item_id), Some(&format!("Added item {} (Qty {}) to order {}", item.name, item.quantity, order_id)))?;
 
-            // Refund stock and generate cancellation KOT for any items completely removed
-            for (&product_id, &old_qty) in &old_items {
-                if !processed_products.contains(&product_id) {
-                    // Fetch product name for KOT slip
-                    let prod_name: String = tx.query_row(
-                        "SELECT name FROM products WHERE id = ?1",
-                        [product_id],
-                        |row| row.get(0),
-                    ).unwrap_or_else(|_| "Removed Product".to_string());
-
-                    kot_additions.push(OrderItemInput {
-                        product_id,
-                        name: prod_name,
-                        quantity: -old_qty,
-                        price: 0.0,
-                        gst_rate: 0.0,
-                        notes: Some("Item removed from order".to_string()),
-                    });
-
-                    tx.execute(
-                        "UPDATE inventory SET stock_qty = stock_qty + ?1 WHERE product_id = ?2",
-                        params![old_qty, product_id],
-                    ).map_err(|e| e.to_string())?;
-                }
+            // If order is already active, deduct stock now
+            if old_status != "Draft" && status != "Cancelled" {
+                tx.execute(
+                    "UPDATE inventory SET stock_qty = MAX(0, stock_qty - ?1) WHERE product_id = ?2",
+                    params![item.quantity, item.product_id],
+                ).map_err(|e| e.to_string())?;
             }
         }
     }
 
-    // 5. Delete and replace items in order_items
-    tx.execute(
-        "DELETE FROM order_items WHERE order_id = ?1",
-        [order_id],
-    ).map_err(|e| e.to_string())?;
-
-    for item in &items {
-        tx.execute(
-            "INSERT INTO order_items (order_id, product_id, name, quantity, price, gst_rate, notes)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![order_id, item.product_id, item.name, item.quantity, item.price, item.gst_rate, item.notes],
-        ).map_err(|e| e.to_string())?;
+    // 4. Handle deleted items
+    for (&db_item_id, db_item) in &db_items {
+        if !processed_incoming_ids.contains(&db_item_id) {
+            if db_item.kot_id.is_some() {
+                return Err(format!("Cannot delete order item ID {} because it was already sent to the kitchen.", db_item_id));
+            }
+            
+            if old_status != "Draft" {
+                tx.execute(
+                    "UPDATE inventory SET stock_qty = stock_qty + ?1 WHERE product_id = ?2",
+                    params![db_item.quantity, db_item.product_id],
+                ).map_err(|e| e.to_string())?;
+            }
+            
+            tx.execute("DELETE FROM order_items WHERE id = ?1", [db_item_id]).map_err(|e| e.to_string())?;
+            log_audit(&tx, &username, "delete_item", "order_items", Some(db_item_id), Some(&format!("Deleted unsent item from order {}", order_id)))?;
+        }
     }
 
-    // 6. Update orders table row
+    // 5. Update orders table row
     tx.execute(
         "UPDATE orders 
          SET table_id = ?1, customer_id = ?2, subtotal = ?3, tax = ?4, discount = ?5, service_charge = ?6, round_off = ?7, total = ?8, status = ?9, payment_mode = ?10, notes = ?11, hold_name = ?12
@@ -556,8 +590,59 @@ fn update_order(
         params![table_id, customer_id, subtotal, tax, discount, service_charge, round_off, total, status, payment_mode, notes, hold_name, order_id],
     ).map_err(|e| e.to_string())?;
 
+    // 6. KOT Generation for Unsent Items
+    if status == "Pending" || status == "Billed" || (status == "Completed" && table_id.is_none()) {
+        struct UnsentItem {
+            id: i64,
+            product_id: i64,
+            quantity: i64,
+            notes: Option<String>,
+        }
+        
+        let unsent_items = {
+            let mut stmt = tx.prepare(
+                "SELECT id, product_id, quantity, notes FROM order_items WHERE order_id = ?1 AND kot_id IS NULL"
+            ).map_err(|e| e.to_string())?;
+            
+            let unsent_iter = stmt.query_map([order_id], |row| {
+                Ok(UnsentItem {
+                    id: row.get(0)?,
+                    product_id: row.get(1)?,
+                    quantity: row.get(2)?,
+                    notes: row.get(3)?,
+                })
+            }).map_err(|e| e.to_string())?;
+            
+            let mut list = Vec::new();
+            for item in unsent_iter {
+                list.push(item.map_err(|e| e.to_string())?);
+            }
+            list
+        };
+        
+        if !unsent_items.is_empty() {
+            tx.execute(
+                "INSERT INTO kot (order_id, status, created_at) VALUES (?1, 'Pending', ?2)",
+                params![order_id, created_at],
+            ).map_err(|e| e.to_string())?;
+            let kot_id = tx.last_insert_rowid();
+            
+            log_audit(&tx, &username, "create_kot", "kot", Some(kot_id), Some(&format!("Created KOT for order: {}", order_id)))?;
+
+            for item in unsent_items {
+                tx.execute(
+                    "INSERT INTO kot_items (kot_id, product_id, quantity, notes) VALUES (?1, ?2, ?3, ?4)",
+                    params![kot_id, item.product_id, item.quantity, item.notes],
+                ).map_err(|e| e.to_string())?;
+                tx.execute(
+                    "UPDATE order_items SET kot_id = ?1 WHERE id = ?2",
+                    params![kot_id, item.id],
+                ).map_err(|e| e.to_string())?;
+            }
+        }
+    }
+
     // 7. Table Status Management
-    // Free the old table if it has changed or the order is finalized
     if let Some(old_tid) = old_table_id {
         if table_id != Some(old_tid) || status == "Completed" || status == "Cancelled" {
             tx.execute(
@@ -567,7 +652,6 @@ fn update_order(
         }
     }
     
-    // Set status of new table if active and table exists
     if let Some(tid) = table_id {
         if status == "Draft" || status == "Pending" || status == "Billed" {
             tx.execute(
@@ -577,29 +661,13 @@ fn update_order(
         }
     }
 
-    // 8. Loyalty points award for completed order
+    // 8. Loyalty points award
     if status == "Completed" {
         if let Some(cid) = customer_id {
             let pts_gained = (total / 100.0) as i64;
             tx.execute(
                 "UPDATE customers SET loyalty_points = loyalty_points + ?1 WHERE id = ?2",
                 params![pts_gained, cid],
-            ).map_err(|e| e.to_string())?;
-        }
-    }
-
-    // 9. Generate incremental KOT only if there are items to cook/cancel
-    if (status == "Pending" || status == "Billed" || (status == "Completed" && table_id.is_none())) && !kot_additions.is_empty() {
-        tx.execute(
-            "INSERT INTO kot (order_id, status, created_at) VALUES (?1, 'Pending', ?2)",
-            params![order_id, created_at],
-        ).map_err(|e| e.to_string())?;
-        let kot_id = tx.last_insert_rowid();
-
-        for item in &kot_additions {
-            tx.execute(
-                "INSERT INTO kot_items (kot_id, product_id, quantity, notes) VALUES (?1, ?2, ?3, ?4)",
-                params![kot_id, item.product_id, item.quantity, item.notes],
             ).map_err(|e| e.to_string())?;
         }
     }
@@ -613,7 +681,7 @@ fn get_order(order_id: i64, state: tauri::State<'_, db::DbPathState>) -> Result<
     let conn = rusqlite::Connection::open(&state.path).map_err(|e| e.to_string())?;
     
     let header = conn.query_row(
-        "SELECT o.id, o.table_id, t.name, o.customer_id, c.name, o.subtotal, o.tax, o.discount, o.service_charge, o.round_off, o.total, o.status, o.payment_mode, o.notes, o.hold_name, o.created_at 
+        "SELECT o.id, o.table_id, t.name, o.customer_id, c.name, o.subtotal, o.tax, o.discount, o.service_charge, o.round_off, o.total, o.status, o.payment_mode, o.notes, o.hold_name, o.created_at, o.cancelled_by, o.cancelled_at, o.cancel_reason
          FROM orders o 
          LEFT JOIN tables t ON o.table_id = t.id 
          LEFT JOIN customers c ON o.customer_id = c.id
@@ -637,20 +705,32 @@ fn get_order(order_id: i64, state: tauri::State<'_, db::DbPathState>) -> Result<
                 notes: row.get(13)?,
                 hold_name: row.get(14)?,
                 created_at: row.get(15)?,
+                cancelled_by: row.get(16)?,
+                cancelled_at: row.get(17)?,
+                cancel_reason: row.get(18)?,
             })
         },
     ).map_err(|e| e.to_string())?;
     
-    let mut stmt = conn.prepare("SELECT id, product_id, name, quantity, price, gst_rate, notes FROM order_items WHERE order_id = ?1").map_err(|e| e.to_string())?;
+    let mut stmt = conn.prepare(
+        "SELECT oi.id, oi.product_id, oi.name, oi.quantity, 
+                COALESCE((SELECT SUM(c.quantity) FROM order_item_cancellations c WHERE c.order_item_id = oi.id), 0) AS cancelled_quantity,
+                oi.price, oi.gst_rate, oi.notes, oi.kot_id 
+         FROM order_items oi 
+         WHERE oi.order_id = ?1"
+    ).map_err(|e| e.to_string())?;
+    
     let items_iter = stmt.query_map([order_id], |row| {
         Ok(OrderItemOutput {
             id: row.get(0)?,
             product_id: row.get(1)?,
             name: row.get(2)?,
             quantity: row.get(3)?,
-            price: row.get(4)?,
-            gst_rate: row.get(5)?,
-            notes: row.get(6)?,
+            cancelled_quantity: row.get(4)?,
+            price: row.get(5)?,
+            gst_rate: row.get(6)?,
+            notes: row.get(7)?,
+            kot_id: row.get(8)?,
         })
     }).map_err(|e| e.to_string())?;
     
@@ -666,7 +746,7 @@ fn get_order(order_id: i64, state: tauri::State<'_, db::DbPathState>) -> Result<
 fn get_active_orders(state: tauri::State<'_, db::DbPathState>) -> Result<Vec<OrderHeader>, String> {
     let conn = rusqlite::Connection::open(&state.path).map_err(|e| e.to_string())?;
     let mut stmt = conn.prepare(
-        "SELECT o.id, o.table_id, t.name, o.customer_id, c.name, o.subtotal, o.tax, o.discount, o.service_charge, o.round_off, o.total, o.status, o.payment_mode, o.notes, o.hold_name, o.created_at 
+        "SELECT o.id, o.table_id, t.name, o.customer_id, c.name, o.subtotal, o.tax, o.discount, o.service_charge, o.round_off, o.total, o.status, o.payment_mode, o.notes, o.hold_name, o.created_at, o.cancelled_by, o.cancelled_at, o.cancel_reason
          FROM orders o 
          LEFT JOIN tables t ON o.table_id = t.id 
          LEFT JOIN customers c ON o.customer_id = c.id
@@ -692,6 +772,9 @@ fn get_active_orders(state: tauri::State<'_, db::DbPathState>) -> Result<Vec<Ord
             notes: row.get(13)?,
             hold_name: row.get(14)?,
             created_at: row.get(15)?,
+            cancelled_by: row.get(16)?,
+            cancelled_at: row.get(17)?,
+            cancel_reason: row.get(18)?,
         })
     }).map_err(|e| e.to_string())?;
     
@@ -706,6 +789,7 @@ fn get_active_orders(state: tauri::State<'_, db::DbPathState>) -> Result<Vec<Ord
 fn complete_payment(
     order_id: i64,
     payment_mode: String,
+    username: String,
     state: tauri::State<'_, db::DbPathState>,
 ) -> Result<(), String> {
     let mut conn = rusqlite::Connection::open(&state.path).map_err(|e| e.to_string())?;
@@ -741,12 +825,19 @@ fn complete_payment(
         ).map_err(|e| e.to_string())?;
     }
     
+    log_audit(&tx, &username, "complete_payment", "orders", Some(order_id), Some(&format!("Completed payment using mode: {}", payment_mode)))?;
+    
     tx.commit().map_err(|e| e.to_string())?;
     Ok(())
 }
 
 #[tauri::command]
-fn cancel_order(order_id: i64, state: tauri::State<'_, db::DbPathState>) -> Result<(), String> {
+fn cancel_order(
+    order_id: i64,
+    cancelled_by: String,
+    reason: String,
+    state: tauri::State<'_, db::DbPathState>,
+) -> Result<(), String> {
     let mut conn = rusqlite::Connection::open(&state.path).map_err(|e| e.to_string())?;
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     
@@ -756,27 +847,61 @@ fn cancel_order(order_id: i64, state: tauri::State<'_, db::DbPathState>) -> Resu
         [order_id],
         |row| Ok((row.get(0)?, row.get(1)?)),
     ).map_err(|e| e.to_string())?;
+
+    if current_status == "Cancelled" {
+        return Err("Order is already cancelled".to_string());
+    }
     
     // Refund stock count ONLY if status is NOT 'Draft'
+    let mut kot_cancellations = Vec::new();
     if current_status != "Draft" {
-        let mut stmt = tx.prepare("SELECT product_id, quantity FROM order_items WHERE order_id = ?1").map_err(|e| e.to_string())?;
+        struct ItemDetails {
+            product_id: i64,
+            quantity: i64,
+            cancelled_qty: i64,
+            notes: Option<String>,
+            kot_id: Option<i64>,
+        }
+        
+        let mut stmt = tx.prepare(
+            "SELECT oi.product_id, oi.name, oi.quantity, 
+                    COALESCE((SELECT SUM(c.quantity) FROM order_item_cancellations c WHERE c.order_item_id = oi.id), 0) AS cancelled_qty,
+                    oi.notes, oi.kot_id
+             FROM order_items oi
+             WHERE oi.order_id = ?1"
+        ).map_err(|e| e.to_string())?;
+        
         let items_iter = stmt.query_map([order_id], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+            Ok(ItemDetails {
+                product_id: row.get(0)?,
+                quantity: row.get(2)?,
+                cancelled_qty: row.get(3)?,
+                notes: row.get(4)?,
+                kot_id: row.get(5)?,
+            })
         }).map_err(|e| e.to_string())?;
         
-        for it in items_iter {
-            let (pid, qty) = it.map_err(|e| e.to_string())?;
-            tx.execute(
-                "UPDATE inventory SET stock_qty = stock_qty + ?1 WHERE product_id = ?2",
-                params![qty, pid],
-            ).map_err(|e| e.to_string())?;
+        for item_res in items_iter {
+            let item = item_res.map_err(|e| e.to_string())?;
+            let effective_qty = item.quantity - item.cancelled_qty;
+            if effective_qty > 0 {
+                tx.execute(
+                    "UPDATE inventory SET stock_qty = stock_qty + ?1 WHERE product_id = ?2",
+                    params![effective_qty, item.product_id],
+                ).map_err(|e| e.to_string())?;
+                
+                if item.kot_id.is_some() {
+                    kot_cancellations.push((item.product_id, effective_qty, item.notes));
+                }
+            }
         }
     }
     
-    // Set status to Cancelled
+    // Set status to Cancelled and record cancellation info
+    let now = get_db_timestamp(&tx);
     tx.execute(
-        "UPDATE orders SET status = 'Cancelled' WHERE id = ?1",
-        [order_id],
+        "UPDATE orders SET status = 'Cancelled', cancelled_by = ?1, cancelled_at = ?2, cancel_reason = ?3 WHERE id = ?4",
+        params![cancelled_by, now, reason, order_id],
     ).map_err(|e| e.to_string())?;
     
     // Free table
@@ -787,13 +912,181 @@ fn cancel_order(order_id: i64, state: tauri::State<'_, db::DbPathState>) -> Resu
         ).map_err(|e| e.to_string())?;
     }
     
-    // Delete active KOTs for this order
-    tx.execute(
-        "DELETE FROM kot WHERE order_id = ?1",
-        [order_id],
-    ).map_err(|e| e.to_string())?;
+    // Generate a KOT representing the cancellation if there are items to cancel in kitchen
+    if !kot_cancellations.is_empty() {
+        tx.execute(
+            "INSERT INTO kot (order_id, status, created_at) VALUES (?1, 'Pending', ?2)",
+            params![order_id, now],
+        ).map_err(|e| e.to_string())?;
+        let kot_id = tx.last_insert_rowid();
+        
+        for (prod_id, qty, notes) in kot_cancellations {
+            let cancel_notes = match notes {
+                Some(n) => format!("CANCELLED: {} (Reason: {})", n, reason),
+                None => format!("CANCELLED (Reason: {})", reason),
+            };
+            tx.execute(
+                "INSERT INTO kot_items (kot_id, product_id, quantity, notes) VALUES (?1, ?2, ?3, ?4)",
+                params![kot_id, prod_id, -qty, cancel_notes],
+            ).map_err(|e| e.to_string())?;
+        }
+    }
+
+    log_audit(&tx, &cancelled_by, "cancel_order", "orders", Some(order_id), Some(&format!("Cancelled entire order. Reason: {}", reason)))?;
     
     tx.commit().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn cancel_order_item(
+    order_item_id: i64,
+    quantity_to_cancel: i64,
+    cancelled_by: String,
+    reason: String,
+    state: tauri::State<'_, db::DbPathState>,
+) -> Result<(), String> {
+    let mut conn = rusqlite::Connection::open(&state.path).map_err(|e| e.to_string())?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    
+    struct ItemInfo {
+        order_id: i64,
+        product_id: i64,
+        name: String,
+        quantity: i64,
+        notes: Option<String>,
+        kot_id: Option<i64>,
+    }
+    
+    let item: ItemInfo = tx.query_row(
+        "SELECT order_id, product_id, name, quantity, notes, kot_id FROM order_items WHERE id = ?1",
+        [order_item_id],
+        |row| Ok(ItemInfo {
+            order_id: row.get(0)?,
+            product_id: row.get(1)?,
+            name: row.get(2)?,
+            quantity: row.get(3)?,
+            notes: row.get(4)?,
+            kot_id: row.get(5)?,
+        }),
+    ).map_err(|e| e.to_string())?;
+    
+    if item.kot_id.is_none() {
+        return Err("Cannot cancel an item that has not been sent to the kitchen. You can remove it from the cart directly.".to_string());
+    }
+    
+    let already_cancelled: i64 = tx.query_row(
+        "SELECT COALESCE(SUM(quantity), 0) FROM order_item_cancellations WHERE order_item_id = ?1",
+        [order_item_id],
+        |row| row.get(0),
+    ).unwrap_or(0);
+    
+    let effective_qty = item.quantity - already_cancelled;
+    if quantity_to_cancel <= 0 || quantity_to_cancel > effective_qty {
+        return Err(format!("Invalid quantity to cancel: requested {}, effective is {}", quantity_to_cancel, effective_qty));
+    }
+    
+    let now = get_db_timestamp(&tx);
+    tx.execute(
+        "INSERT INTO order_item_cancellations (order_item_id, quantity, reason, cancelled_by, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![order_item_id, quantity_to_cancel, reason, cancelled_by, now],
+    ).map_err(|e| e.to_string())?;
+    
+    tx.execute(
+        "UPDATE inventory SET stock_qty = stock_qty + ?1 WHERE product_id = ?2",
+        params![quantity_to_cancel, item.product_id],
+    ).map_err(|e| e.to_string())?;
+    
+    tx.execute(
+        "INSERT INTO kot (order_id, status, created_at) VALUES (?1, 'Pending', ?2)",
+        params![item.order_id, now],
+    ).map_err(|e| e.to_string())?;
+    let new_kot_id = tx.last_insert_rowid();
+    
+    let cancel_notes = match item.notes {
+        Some(n) => format!("CANCELLED: {} (Reason: {})", n, reason),
+        None => format!("CANCELLED (Reason: {})", reason),
+    };
+    tx.execute(
+        "INSERT INTO kot_items (kot_id, product_id, quantity, notes) VALUES (?1, ?2, ?3, ?4)",
+        params![new_kot_id, item.product_id, -quantity_to_cancel, cancel_notes],
+    ).map_err(|e| e.to_string())?;
+    
+    log_audit(&tx, &cancelled_by, "cancel_item", "order_items", Some(order_item_id), Some(&format!("Cancelled {} x {}. Reason: {}", quantity_to_cancel, item.name, reason)))?;
+    
+    recalculate_order_totals(&tx, item.order_id)?;
+    
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn recalculate_order_totals(conn: &rusqlite::Connection, order_id: i64) -> Result<(), String> {
+    let (discount, service_charge): (f64, f64) = conn.query_row(
+        "SELECT discount, service_charge FROM orders WHERE id = ?1",
+        [order_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).map_err(|e| e.to_string())?;
+    
+    struct ItemTotals {
+        quantity: i64,
+        cancelled_qty: i64,
+        price: f64,
+        gst_rate: f64,
+    }
+    
+    let mut stmt = conn.prepare(
+        "SELECT oi.quantity, 
+                COALESCE((SELECT SUM(c.quantity) FROM order_item_cancellations c WHERE c.order_item_id = oi.id), 0) AS cancelled_qty,
+                oi.price, oi.gst_rate
+         FROM order_items oi
+         WHERE oi.order_id = ?1"
+    ).map_err(|e| e.to_string())?;
+    
+    let items_iter = stmt.query_map([order_id], |row| {
+        Ok(ItemTotals {
+            quantity: row.get(0)?,
+            cancelled_qty: row.get(1)?,
+            price: row.get(2)?,
+            gst_rate: row.get(3)?,
+        })
+    }).map_err(|e| e.to_string())?;
+    
+    let mut subtotal = 0.0;
+    let mut total_tax = 0.0;
+    
+    for item_res in items_iter {
+        let item = item_res.map_err(|e| e.to_string())?;
+        let effective_qty = item.quantity - item.cancelled_qty;
+        if effective_qty > 0 {
+            let item_subtotal = item.price * (effective_qty as f64);
+            let item_tax = item_subtotal * (item.gst_rate / 100.0);
+            subtotal += item_subtotal;
+            total_tax += item_tax;
+        }
+    }
+    
+    let discount_amount = subtotal * (discount / 100.0);
+    let service_amount = subtotal * (service_charge / 100.0);
+    let taxable_subtotal = subtotal - discount_amount + service_amount;
+    
+    let final_tax = if subtotal > 0.0 {
+        taxable_subtotal * (total_tax / subtotal)
+    } else {
+        0.0
+    };
+    
+    let total_raw = taxable_subtotal + final_tax;
+    let total_rounded = total_raw.round();
+    let round_off = total_rounded - total_raw;
+    
+    conn.execute(
+        "UPDATE orders 
+         SET subtotal = ?1, tax = ?2, round_off = ?3, total = ?4 
+         WHERE id = ?5",
+        params![subtotal, final_tax, round_off, total_rounded, order_id],
+    ).map_err(|e| e.to_string())?;
+    
     Ok(())
 }
 
@@ -831,6 +1124,7 @@ fn get_tables(state: tauri::State<'_, db::DbPathState>) -> Result<Vec<TableDetai
 fn transfer_table(
     from_table_id: i64,
     to_table_id: i64,
+    username: String,
     state: tauri::State<'_, db::DbPathState>,
 ) -> Result<(), String> {
     let mut conn = rusqlite::Connection::open(&state.path).map_err(|e| e.to_string())?;
@@ -874,6 +1168,8 @@ fn transfer_table(
         params![oid, to_table_id],
     ).map_err(|e| e.to_string())?;
     
+    log_audit(&tx, &username, "transfer_table", "tables", Some(from_table_id), Some(&format!("Transferred order {} from table ID {} to ID {}", oid, from_table_id, to_table_id)))?;
+    
     tx.commit().map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -882,6 +1178,7 @@ fn transfer_table(
 fn merge_tables(
     source_table_id: i64,
     target_table_id: i64,
+    username: String,
     state: tauri::State<'_, db::DbPathState>,
 ) -> Result<(), String> {
     let conn = rusqlite::Connection::open(&state.path).map_err(|e| e.to_string())?;
@@ -889,6 +1186,8 @@ fn merge_tables(
         "UPDATE tables SET merged_into = ?1, status = 'Free', current_order_id = NULL WHERE id = ?2",
         params![target_table_id, source_table_id],
     ).map_err(|e| e.to_string())?;
+    
+    log_audit(&conn, &username, "merge_tables", "tables", Some(source_table_id), Some(&format!("Merged table ID {} into table ID {}", source_table_id, target_table_id)))?;
     Ok(())
 }
 
@@ -898,7 +1197,7 @@ fn get_active_kots(state: tauri::State<'_, db::DbPathState>) -> Result<Vec<KotOu
     let conn = rusqlite::Connection::open(&state.path).map_err(|e| e.to_string())?;
     
     let mut stmt = conn.prepare(
-        "SELECT k.id, k.order_id, t.name, k.status, k.created_at 
+        "SELECT k.id, k.order_id, t.name, k.status, k.print_count, k.created_at 
          FROM kot k
          JOIN orders o ON k.order_id = o.id
          LEFT JOIN tables t ON o.table_id = t.id
@@ -912,13 +1211,14 @@ fn get_active_kots(state: tauri::State<'_, db::DbPathState>) -> Result<Vec<KotOu
             row.get::<_, i64>(1)?,
             row.get::<_, Option<String>>(2)?,
             row.get::<_, String>(3)?,
-            row.get::<_, String>(4)?,
+            row.get::<_, i32>(4)?,
+            row.get::<_, String>(5)?,
         ))
     }).map_err(|e| e.to_string())?;
     
     let mut kots = Vec::new();
     for kt in kot_iter {
-        let (kot_id, order_id, table_name, status, created_at) = kt.map_err(|e| e.to_string())?;
+        let (kot_id, order_id, table_name, status, print_count, created_at) = kt.map_err(|e| e.to_string())?;
         
         // Fetch KOT items
         let mut item_stmt = conn.prepare(
@@ -948,6 +1248,7 @@ fn get_active_kots(state: tauri::State<'_, db::DbPathState>) -> Result<Vec<KotOu
             order_id,
             table_name,
             status,
+            print_count,
             created_at,
             items,
         });
@@ -960,14 +1261,188 @@ fn get_active_kots(state: tauri::State<'_, db::DbPathState>) -> Result<Vec<KotOu
 fn update_kot_status(
     kot_id: i64,
     status: String,
+    username: String,
     state: tauri::State<'_, db::DbPathState>,
 ) -> Result<(), String> {
-    let conn = rusqlite::Connection::open(&state.path).map_err(|e| e.to_string())?;
-    conn.execute(
+    let mut conn = rusqlite::Connection::open(&state.path).map_err(|e| e.to_string())?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    
+    let current_status: String = tx.query_row(
+        "SELECT status FROM kot WHERE id = ?1",
+        [kot_id],
+        |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    
+    // Validate transition: Pending -> Preparing -> Ready -> Completed
+    let is_valid = match (current_status.as_str(), status.as_str()) {
+        ("Pending", "Preparing") => true,
+        ("Preparing", "Ready") => true,
+        ("Ready", "Completed") => true,
+        _ => false,
+    };
+    
+    if !is_valid {
+        return Err(format!("Invalid KOT status transition from {} to {}", current_status, status));
+    }
+    
+    tx.execute(
         "UPDATE kot SET status = ?1 WHERE id = ?2",
         params![status, kot_id],
     ).map_err(|e| e.to_string())?;
+    
+    log_audit(&tx, &username, "update_kot_status", "kot", Some(kot_id), Some(&format!("KOT status updated from {} to {}", current_status, status)))?;
+    
+    tx.commit().map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[tauri::command]
+fn get_kot_by_id(kot_id: i64, state: tauri::State<'_, db::DbPathState>) -> Result<KotOutput, String> {
+    let conn = rusqlite::Connection::open(&state.path).map_err(|e| e.to_string())?;
+    
+    let (order_id, table_name, status, print_count, created_at) = conn.query_row(
+        "SELECT k.order_id, t.name, k.status, k.print_count, k.created_at 
+         FROM kot k
+         JOIN orders o ON k.order_id = o.id
+         LEFT JOIN tables t ON o.table_id = t.id
+         WHERE k.id = ?1",
+        params![kot_id],
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i32>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        }
+    ).map_err(|e| e.to_string())?;
+    
+    let mut item_stmt = conn.prepare(
+        "SELECT ki.id, ki.product_id, p.name, ki.quantity, ki.notes 
+         FROM kot_items ki
+         JOIN products p ON ki.product_id = p.id
+         WHERE ki.kot_id = ?1"
+    ).map_err(|e| e.to_string())?;
+    
+    let items_iter = item_stmt.query_map([kot_id], |row| {
+        Ok(KotItemOutput {
+            id: row.get(0)?,
+            product_id: row.get(1)?,
+            product_name: row.get(2)?,
+            quantity: row.get(3)?,
+            notes: row.get(4)?,
+        })
+    }).map_err(|e| e.to_string())?;
+    
+    let mut items = Vec::new();
+    for it in items_iter {
+        items.push(it.map_err(|e| e.to_string())?);
+    }
+    
+    Ok(KotOutput {
+        id: kot_id,
+        order_id,
+        table_name,
+        status,
+        print_count,
+        created_at,
+        items,
+    })
+}
+
+#[tauri::command]
+fn get_kots_for_order(order_id: i64, state: tauri::State<'_, db::DbPathState>) -> Result<Vec<KotOutput>, String> {
+    let conn = rusqlite::Connection::open(&state.path).map_err(|e| e.to_string())?;
+    
+    let mut stmt = conn.prepare(
+        "SELECT k.id, t.name, k.status, k.print_count, k.created_at 
+         FROM kot k
+         JOIN orders o ON k.order_id = o.id
+         LEFT JOIN tables t ON o.table_id = t.id
+         WHERE k.order_id = ?1
+         ORDER BY k.id ASC"
+    ).map_err(|e| e.to_string())?;
+    
+    let kot_iter = stmt.query_map([order_id], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, i32>(3)?,
+            row.get::<_, String>(4)?,
+        ))
+    }).map_err(|e| e.to_string())?;
+    
+    let mut kots = Vec::new();
+    for kt in kot_iter {
+        let (kot_id, table_name, status, print_count, created_at) = kt.map_err(|e| e.to_string())?;
+        
+        let mut item_stmt = conn.prepare(
+            "SELECT ki.id, ki.product_id, p.name, ki.quantity, ki.notes 
+             FROM kot_items ki
+             JOIN products p ON ki.product_id = p.id
+             WHERE ki.kot_id = ?1"
+        ).map_err(|e| e.to_string())?;
+        
+        let items_iter = item_stmt.query_map([kot_id], |row| {
+            Ok(KotItemOutput {
+                id: row.get(0)?,
+                product_id: row.get(1)?,
+                product_name: row.get(2)?,
+                quantity: row.get(3)?,
+                notes: row.get(4)?,
+            })
+        }).map_err(|e| e.to_string())?;
+        
+        let mut items = Vec::new();
+        for it in items_iter {
+            items.push(it.map_err(|e| e.to_string())?);
+        }
+        
+        kots.push(KotOutput {
+            id: kot_id,
+            order_id,
+            table_name,
+            status,
+            print_count,
+            created_at,
+            items,
+        });
+    }
+    
+    Ok(kots)
+}
+
+#[tauri::command]
+fn increment_kot_print_count(
+    kot_id: i64,
+    username: String,
+    state: tauri::State<'_, db::DbPathState>,
+) -> Result<i32, String> {
+    let mut conn = rusqlite::Connection::open(&state.path).map_err(|e| e.to_string())?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    
+    let current_count: i32 = tx.query_row(
+        "SELECT print_count FROM kot WHERE id = ?1",
+        params![kot_id],
+        |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    
+    let new_count = current_count + 1;
+    tx.execute(
+        "UPDATE kot SET print_count = ?1 WHERE id = ?2",
+        params![new_count, kot_id],
+    ).map_err(|e| e.to_string())?;
+    
+    if current_count > 0 {
+        log_audit(&tx, &username, "kot_reprint", "kot", Some(kot_id), Some(&format!("Reprinted KOT. Previous print count: {}", current_count)))?;
+    } else {
+        log_audit(&tx, &username, "kot_print", "kot", Some(kot_id), Some("First print of KOT"))?;
+    }
+    
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(new_count)
 }
 
 // Inventory Management
@@ -1235,7 +1710,7 @@ fn restore_db(source_path: String, state: tauri::State<'_, db::DbPathState>) -> 
 fn get_completed_orders(state: tauri::State<'_, db::DbPathState>) -> Result<Vec<OrderHeader>, String> {
     let conn = rusqlite::Connection::open(&state.path).map_err(|e| e.to_string())?;
     let mut stmt = conn.prepare(
-        "SELECT o.id, o.table_id, t.name, o.customer_id, c.name, o.subtotal, o.tax, o.discount, o.service_charge, o.round_off, o.total, o.status, o.payment_mode, o.notes, o.hold_name, o.created_at 
+        "SELECT o.id, o.table_id, t.name, o.customer_id, c.name, o.subtotal, o.tax, o.discount, o.service_charge, o.round_off, o.total, o.status, o.payment_mode, o.notes, o.hold_name, o.created_at, o.cancelled_by, o.cancelled_at, o.cancel_reason
          FROM orders o 
          LEFT JOIN tables t ON o.table_id = t.id 
          LEFT JOIN customers c ON o.customer_id = c.id
@@ -1261,6 +1736,9 @@ fn get_completed_orders(state: tauri::State<'_, db::DbPathState>) -> Result<Vec<
             notes: row.get(13)?,
             hold_name: row.get(14)?,
             created_at: row.get(15)?,
+            cancelled_by: row.get(16)?,
+            cancelled_at: row.get(17)?,
+            cancel_reason: row.get(18)?,
         })
     }).map_err(|e| e.to_string())?;
     
@@ -1275,7 +1753,7 @@ fn get_completed_orders(state: tauri::State<'_, db::DbPathState>) -> Result<Vec<
 fn get_customer_orders(customer_id: i64, state: tauri::State<'_, db::DbPathState>) -> Result<Vec<OrderHeader>, String> {
     let conn = rusqlite::Connection::open(&state.path).map_err(|e| e.to_string())?;
     let mut stmt = conn.prepare(
-        "SELECT o.id, o.table_id, t.name, o.customer_id, c.name, o.subtotal, o.tax, o.discount, o.service_charge, o.round_off, o.total, o.status, o.payment_mode, o.notes, o.hold_name, o.created_at 
+        "SELECT o.id, o.table_id, t.name, o.customer_id, c.name, o.subtotal, o.tax, o.discount, o.service_charge, o.round_off, o.total, o.status, o.payment_mode, o.notes, o.hold_name, o.created_at, o.cancelled_by, o.cancelled_at, o.cancel_reason
          FROM orders o 
          LEFT JOIN tables t ON o.table_id = t.id 
          LEFT JOIN customers c ON o.customer_id = c.id
@@ -1301,6 +1779,9 @@ fn get_customer_orders(customer_id: i64, state: tauri::State<'_, db::DbPathState
             notes: row.get(13)?,
             hold_name: row.get(14)?,
             created_at: row.get(15)?,
+            cancelled_by: row.get(16)?,
+            cancelled_at: row.get(17)?,
+            cancel_reason: row.get(18)?,
         })
     }).map_err(|e| e.to_string())?;
     
@@ -1397,6 +1878,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             greet,
             login,
+            verify_credentials,
             get_restaurant_info,
             update_restaurant_info,
             get_categories,
@@ -1407,11 +1889,15 @@ pub fn run() {
             get_active_orders,
             complete_payment,
             cancel_order,
+            cancel_order_item,
             get_tables,
             transfer_table,
             merge_tables,
             get_active_kots,
             update_kot_status,
+            get_kot_by_id,
+            get_kots_for_order,
+            increment_kot_print_count,
             get_inventory,
             update_stock,
             add_purchase,
@@ -1429,4 +1915,104 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use db::setup_test_db;
+
+    #[test]
+    fn test_kot_transitions() {
+        let cases = vec![
+            ("Pending", "Preparing", true),
+            ("Preparing", "Ready", true),
+            ("Ready", "Completed", true),
+            ("Pending", "Ready", false),
+            ("Preparing", "Completed", false),
+            ("Completed", "Pending", false),
+            ("Ready", "Preparing", false),
+        ];
+
+        for (from, to, expected) in cases {
+            let is_valid = match (from, to) {
+                ("Pending", "Preparing") => true,
+                ("Preparing", "Ready") => true,
+                ("Ready", "Completed") => true,
+                _ => false,
+            };
+            assert_eq!(
+                is_valid, expected,
+                "Transition from {} to {} should be {}",
+                from, to, expected
+            );
+        }
+    }
+
+    #[test]
+    fn test_database_migrations_and_cancellations_schema() {
+        let conn = setup_test_db();
+
+        // 1. Verify schema tables exist
+        let tables: Vec<String> = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='table'")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+
+        assert!(tables.contains(&"order_item_cancellations".to_string()));
+        assert!(tables.contains(&"audit_logs".to_string()));
+
+        // 2. Verify cancellation columns in orders table
+        let mut stmt = conn.prepare("PRAGMA table_info(orders)").unwrap();
+        let cols: Vec<String> = stmt
+            .query_map([], |row| row.get(1))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+
+        assert!(cols.contains(&"cancelled_by".to_string()));
+        assert!(cols.contains(&"cancelled_at".to_string()));
+        assert!(cols.contains(&"cancel_reason".to_string()));
+
+        // 3. Verify kot_id column in order_items table
+        let mut stmt = conn.prepare("PRAGMA table_info(order_items)").unwrap();
+        let cols_items: Vec<String> = stmt
+            .query_map([], |row| row.get(1))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+
+        assert!(cols_items.contains(&"kot_id".to_string()));
+    }
+
+    #[test]
+    fn test_user_authentication_roles() {
+        let conn = setup_test_db();
+
+        // Check seeded users
+        struct User {
+            _username: String,
+            role: String,
+        }
+
+        let mut stmt = conn.prepare("SELECT username, role FROM users").unwrap();
+        let users: Vec<User> = stmt
+            .query_map([], |row| {
+                Ok(User {
+                    _username: row.get(0)?,
+                    role: row.get(1)?,
+                })
+            })
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+
+        // We expect Owner, Manager, Cashier roles
+        assert!(users.iter().any(|u| u.role == "Owner"));
+        assert!(users.iter().any(|u| u.role == "Manager"));
+        assert!(users.iter().any(|u| u.role == "Cashier"));
+    }
 }

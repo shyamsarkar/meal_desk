@@ -645,6 +645,11 @@ select.form-input.has-selection {
   padding: 12px;
 }
 
+.cart-item.locked {
+  border-left: 3px solid var(--accent);
+  background: rgba(255, 255, 255, 0.02);
+}
+
 .cart-item-details {
   flex: 1;
   display: flex;
@@ -1060,6 +1065,17 @@ tr:hover td {
   background: rgba(255, 255, 255, 0.01);
 }
 
+/* Receipt Print Area formatting overrides */
+#receipt-print-area table {
+  color: black !important;
+}
+#receipt-print-area th,
+#receipt-print-area td {
+  color: black !important;
+  padding: 4px 0 !important;
+  border-bottom: none !important;
+}
+
 .status-badge {
   padding: 2px 8px;
   border-radius: 12px;
@@ -1088,12 +1104,15 @@ tr:hover td {
   body * {
     visibility: hidden;
   }
-  #receipt-print-area, #receipt-print-area * {
+  
+  /* Receipt Print Mode */
+  body.print-receipt-mode #receipt-print-area, 
+  body.print-receipt-mode #receipt-print-area * {
     visibility: visible;
     color: black !important;
     background: transparent !important;
   }
-  #receipt-print-area {
+  body.print-receipt-mode #receipt-print-area {
     position: absolute;
     left: 0;
     top: 0;
@@ -1102,6 +1121,26 @@ tr:hover td {
     padding: 0;
     box-shadow: none;
     background: white !important;
+    display: block !important;
+  }
+
+  /* KOT Print Mode */
+  body.print-kot-mode #kot-print-area, 
+  body.print-kot-mode #kot-print-area * {
+    visibility: visible;
+    color: black !important;
+    background: transparent !important;
+  }
+  body.print-kot-mode #kot-print-area {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    margin: 0;
+    padding: 0;
+    box-shadow: none;
+    background: white !important;
+    display: block !important;
   }
 }
 
