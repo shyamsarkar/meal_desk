@@ -28,7 +28,14 @@ pub fn init_db(app_handle: &AppHandle) -> Result<PathBuf, String> {
     
     Ok(db_path)
 }
-
+#[cfg(test)]
+pub fn setup_test_db() -> Connection {
+    let conn = Connection::open_in_memory().unwrap();
+    create_tables(&conn).unwrap();
+    migrate_db(&conn).unwrap();
+    seed_default_data(&conn).unwrap();
+    conn
+}
 fn migrate_db(conn: &Connection) -> Result<(), String> {
     // 1. Check if database is in a broken state from a previous partial/incorrect migration (referencing orders_old)
     let is_broken: i64 = conn.query_row(
@@ -63,7 +70,7 @@ fn migrate_db(conn: &Connection) -> Result<(), String> {
         |row| row.get(0),
     ).unwrap_or_default();
 
-    if !sql.is_empty() && !sql.contains("'Draft'") {
+    if !sql.is_empty() && (!sql.contains("'Draft'") || !sql.contains("'NC'")) {
         // Run migration using the safe SQLite table recreation template
         conn.execute("PRAGMA foreign_keys = OFF;", []).map_err(|e| e.to_string())?;
 
@@ -80,7 +87,7 @@ fn migrate_db(conn: &Connection) -> Result<(), String> {
                 round_off REAL NOT NULL DEFAULT 0.0,
                 total REAL NOT NULL,
                 status TEXT NOT NULL CHECK (status IN ('Draft', 'Pending', 'Billed', 'Completed', 'Cancelled')),
-                payment_mode TEXT CHECK (payment_mode IN ('Cash', 'UPI', 'Card', 'Mixed', 'None')),
+                payment_mode TEXT CHECK (payment_mode IN ('Cash', 'UPI', 'Card', 'Mixed', 'NC', 'None')),
                 notes TEXT,
                 hold_name TEXT,
                 created_at TEXT NOT NULL
@@ -103,6 +110,84 @@ fn migrate_db(conn: &Connection) -> Result<(), String> {
 
         conn.execute("PRAGMA foreign_keys = ON;", []).map_err(|e| e.to_string())?;
     }
+
+    // Migration for kot table to add print_count column
+    let kot_sql: String = conn.query_row(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'kot'",
+        [],
+        |row| row.get(0),
+    ).unwrap_or_default();
+
+    if !kot_sql.is_empty() && !kot_sql.contains("print_count") {
+        conn.execute(
+            "ALTER TABLE kot ADD COLUMN print_count INTEGER NOT NULL DEFAULT 0;",
+            [],
+        ).map_err(|e| e.to_string())?;
+    }
+
+    // Migration for orders table to add cancellation columns if not present
+    let orders_sql: String = conn.query_row(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'orders'",
+        [],
+        |row| row.get(0),
+    ).unwrap_or_default();
+
+    if !orders_sql.is_empty() && !orders_sql.contains("cancelled_by") {
+        conn.execute(
+            "ALTER TABLE orders ADD COLUMN cancelled_by TEXT;",
+            [],
+        ).map_err(|e| e.to_string())?;
+        conn.execute(
+            "ALTER TABLE orders ADD COLUMN cancelled_at TEXT;",
+            [],
+        ).map_err(|e| e.to_string())?;
+        conn.execute(
+            "ALTER TABLE orders ADD COLUMN cancel_reason TEXT;",
+            [],
+        ).map_err(|e| e.to_string())?;
+    }
+
+    // Migration for order_items table to add kot_id column if not present
+    let order_items_sql: String = conn.query_row(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'order_items'",
+        [],
+        |row| row.get(0),
+    ).unwrap_or_default();
+
+    if !order_items_sql.is_empty() && !order_items_sql.contains("kot_id") {
+        conn.execute(
+            "ALTER TABLE order_items ADD COLUMN kot_id INTEGER REFERENCES kot(id) ON DELETE SET NULL;",
+            [],
+        ).map_err(|e| e.to_string())?;
+    }
+
+    // Create order_item_cancellations table if not exists
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS order_item_cancellations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            order_item_id INTEGER NOT NULL REFERENCES order_items(id) ON DELETE CASCADE,
+            quantity INTEGER NOT NULL,
+            reason TEXT NOT NULL,
+            cancelled_by TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );",
+        [],
+    ).map_err(|e| e.to_string())?;
+
+    // Create audit_logs table if not exists
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS audit_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL,
+            action TEXT NOT NULL,
+            target_type TEXT NOT NULL,
+            target_id INTEGER,
+            details TEXT,
+            created_at TEXT NOT NULL
+        );",
+        [],
+    ).map_err(|e| e.to_string())?;
+
     Ok(())
 }
 
@@ -191,7 +276,7 @@ fn create_tables(conn: &Connection) -> Result<(), String> {
             round_off REAL NOT NULL DEFAULT 0.0,
             total REAL NOT NULL,
             status TEXT NOT NULL CHECK (status IN ('Draft', 'Pending', 'Billed', 'Completed', 'Cancelled')),
-            payment_mode TEXT CHECK (payment_mode IN ('Cash', 'UPI', 'Card', 'Mixed', 'None')),
+            payment_mode TEXT CHECK (payment_mode IN ('Cash', 'UPI', 'Card', 'Mixed', 'NC', 'None')),
             notes TEXT,
             hold_name TEXT,
             created_at TEXT NOT NULL
@@ -218,6 +303,7 @@ fn create_tables(conn: &Connection) -> Result<(), String> {
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
             status TEXT NOT NULL CHECK (status IN ('Pending', 'Preparing', 'Ready', 'Completed')),
+            print_count INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL
         );",
         [],
