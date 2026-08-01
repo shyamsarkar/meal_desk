@@ -33,7 +33,6 @@
 
   --sidebar-width: 250px;
   --cart-width: 360px;
-  --header-height: 70px;
 }
 
 body.light-theme {
@@ -251,7 +250,7 @@ select.form-input.has-selection {
 }
 
 .sidebar-header {
-  height: var(--header-height);
+  height: 60px;
   display: flex;
   align-items: center;
   padding: 0 24px;
@@ -356,65 +355,6 @@ select.form-input.has-selection {
   flex-direction: column;
   overflow: hidden;
   background: var(--bg-app);
-}
-
-/* Header Styling */
-.app-header {
-  height: var(--header-height);
-  border-bottom: 1px solid var(--border);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0 30px;
-  background: var(--bg-panel);
-}
-
-.header-title-container {
-  display: flex;
-  flex-direction: column;
-}
-
-.header-title {
-  font-size: 1.3rem;
-  font-weight: 600;
-  color: var(--text-primary);
-}
-
-.restaurant-subtitle {
-  font-size: 0.8rem;
-  color: var(--text-muted);
-}
-
-.header-meta {
-  display: flex;
-  align-items: center;
-  gap: 20px;
-}
-
-.header-clock {
-  font-weight: 500;
-  font-size: 0.95rem;
-  color: var(--text-secondary);
-  background: var(--bg-card);
-  padding: 6px 12px;
-  border-radius: 6px;
-  border: 1px solid var(--border);
-}
-
-.db-status {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 0.8rem;
-  color: var(--text-secondary);
-}
-
-.status-dot {
-  width: 8px;
-  height: 8px;
-  background-color: var(--success);
-  border-radius: 50%;
-  box-shadow: 0 0 8px var(--success);
 }
 
 /* Panels */

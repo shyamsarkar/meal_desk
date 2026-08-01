@@ -1797,6 +1797,41 @@ fn backup_db(app: tauri::AppHandle, state: tauri::State<'_, db::DbPathState>) ->
 }
 
 #[tauri::command]
+fn void_bill(order_id: i64, state: tauri::State<'_, db::DbPathState>) -> Result<(), String> {
+    let mut conn = rusqlite::Connection::open(&state.path).map_err(|e| e.to_string())?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+
+    // Delete the bill record (cascades to payments)
+    tx.execute("DELETE FROM bills WHERE order_id = ?1", [order_id])
+        .map_err(|e| e.to_string())?;
+
+    // Revert order status back to Pending
+    tx.execute(
+        "UPDATE orders SET status = 'Pending' WHERE id = ?1",
+        [order_id],
+    ).map_err(|e| e.to_string())?;
+
+    // Revert table status back to Occupied if table is assigned
+    let table_id: Option<i64> = tx
+        .query_row(
+            "SELECT table_id FROM orders WHERE id = ?1",
+            [order_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+
+    if let Some(tid) = table_id {
+        tx.execute(
+            "UPDATE tables SET status = 'Occupied' WHERE id = ?1",
+            [tid],
+        ).map_err(|e| e.to_string())?;
+    }
+
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
 fn restore_db(source_path: String, state: tauri::State<'_, db::DbPathState>) -> Result<(), String> {
     std::fs::copy(source_path, &state.path).map(|_| ()).map_err(|e| e.to_string())
 }
@@ -1918,6 +1953,7 @@ pub fn run() {
             get_sales_report,
             backup_db,
             restore_db,
+            void_bill,
             get_completed_orders,
             get_customer_orders,
             get_product_sales_report,

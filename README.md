@@ -64,3 +64,8 @@ npm run tauri build
 ```
 
 The output installers will be saved in `src-tauri/target/release/bundle/`.
+
+bugs:
+- for NC button finalize bill does not work
+- for no table if I change the table the order is missing
+- can we stop printing once we press the button 'finalize bill'

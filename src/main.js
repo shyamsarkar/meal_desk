@@ -93,9 +93,7 @@ function initDOMElements() {
   displayUserName = document.getElementById("display-user-name");
   navItems = document.querySelectorAll(".nav-item");
   panels = document.querySelectorAll(".panel");
-  activePanelTitle = document.getElementById("active-panel-title");
   appClock = document.getElementById("app-clock");
-  restaurantNameHeader = document.getElementById("restaurant-name-header");
 
   // POS
   posCategoriesContainer = document.getElementById("pos-categories");
@@ -310,7 +308,18 @@ function setupEventListeners() {
 
   // Checkout modal
   checkoutBtn.addEventListener("click", openCheckoutScreen);
-  checkoutModalCancel.addEventListener("click", () => checkoutModal.classList.add("hidden"));
+  checkoutModalCancel.addEventListener("click", async () => {
+    checkoutModal.classList.add("hidden");
+    // If we generated a bill to open this modal, void it so the order goes back to editable
+    if (activeOrderId && activeOrderStatus === "Billed") {
+      try {
+        await invoke("void_bill", { orderId: activeOrderId });
+        await resumeOrder(activeOrderId);
+      } catch (err) {
+        console.error("Error voiding bill on cancel:", err);
+      }
+    }
+  });
   checkoutPaymentMode.addEventListener("change", handlePaymentModeChange);
   checkoutCashReceived.addEventListener("input", calculateChangeAmount);
   checkoutModalPrint.addEventListener("click", () => window.print());
@@ -479,7 +488,6 @@ async function performRestore() {
     
     // Reload state after restoration
     restaurantInfo = await invoke("get_restaurant_info");
-    restaurantNameHeader.textContent = restaurantInfo.name;
     categories = await invoke("get_categories");
     renderCategories();
     await loadCustomers();
@@ -508,7 +516,6 @@ async function handleLoginSuccess(user) {
   // Load backend details
   try {
     restaurantInfo = await invoke("get_restaurant_info");
-    restaurantNameHeader.textContent = restaurantInfo.name;
     
     await loadCustomers();
     await loadTablesDropdown();
@@ -583,24 +590,18 @@ async function switchPanel(panelId) {
 
   try {
     if (panelId === "pos") {
-      activePanelTitle.textContent = "Billing POS";
+      // Billing POS
     } else if (panelId === "tables") {
-      activePanelTitle.textContent = "Restaurant Tables";
       await renderTables();
     } else if (panelId === "kitchen") {
-      activePanelTitle.textContent = "Kitchen Live Display";
       await loadKots();
     } else if (panelId === "menu-editor") {
-      activePanelTitle.textContent = "Restaurant Menu Management";
       await renderCategoryEditor();
     } else if (panelId === "customers") {
-      activePanelTitle.textContent = "Customer Profiles Directory";
       await renderCustomersList();
     } else if (panelId === "reports") {
-      activePanelTitle.textContent = "Sales Performance Metrics";
       await generateReport();
     } else if (panelId === "settings") {
-      activePanelTitle.textContent = "Application Settings";
       loadSettingsForm();
     }
   } catch (err) {
@@ -901,8 +902,8 @@ async function resumeOrder(orderId) {
 
     cartDiscountInput.value = orderData.header.discount;
     cartServiceInput.value = orderData.header.service_charge;
-    cartCustomerSelect.value = orderData.header.customer_id || "";
-    cartTableSelect.value = orderData.header.table_id || "";
+    cartCustomerSelect.value = orderData.header.customer_id ? String(orderData.header.customer_id) : "";
+    cartTableSelect.value = orderData.header.table_id ? String(orderData.header.table_id) : "";
 
     activeOrderId = orderId;
     activeOrderStatus = orderData.header.status;
@@ -1838,7 +1839,6 @@ async function saveSettings(e) {
     });
 
     restaurantInfo = await invoke("get_restaurant_info");
-    restaurantNameHeader.textContent = restaurantInfo.name;
 
     modalTitle.textContent = "Configuration Updated";
     modalMsg.textContent = "Restaurant information saved and loaded successfully.";
@@ -1909,18 +1909,14 @@ async function sendKot() {
       }
     }
 
-    // Reset cart UI
+    // Keep the order open — reload it so KOT items show as locked in the cart
     const sentOrderId = orderId || activeOrderId;
-    cart = [];
-    activeOrderId = null;
-    activeOrderStatus = null;
-    cartTableSelect.value = "";
-    cartCustomerSelect.value = "";
-    renderCart();
-    updateSelectColors();
+    await loadTablesDropdown();
+    await loadCustomers();
+    await resumeOrder(sentOrderId);
 
     modalTitle.textContent = "KOT Sent to Kitchen";
-    modalMsg.textContent = `Order #${sentOrderId} saved as Pending and sent to kitchen successfully.`;
+    modalMsg.textContent = `Order #${sentOrderId} sent to kitchen. Add more items or collect payment when ready.`;
     successModal.classList.remove("hidden");
 
     loadKots();

@@ -35,6 +35,7 @@
           "get_sales_report",
           "backup_db",
           "restore_db",
+          "void_bill",
           "get_completed_orders",
           "get_customer_orders",
           "get_product_sales_report",
