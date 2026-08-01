@@ -158,7 +158,7 @@ function initDOMElements() {
   settingsThemeSelect = document.getElementById("settings-theme-select");
   settingsGstDefault = document.getElementById("settings-gst-default");
   settingsPrinterSelect = document.getElementById("settings-printer-select");
-  settingsBackupPath = document.getElementById("settings-backup-path");
+  settingsBackupPath = null;
   settingsBtnBackup = document.getElementById("settings-btn-backup");
   settingsRestorePath = document.getElementById("settings-restore-path");
   settingsBtnRestore = document.getElementById("settings-btn-restore");
@@ -456,18 +456,15 @@ function toggleThemePreference() {
 
 // Backup & Restore
 async function performBackup() {
-  const path = settingsBackupPath.value.trim();
-  if (!path) {
-    alert("Please enter a valid directory path for the backup target");
-    return;
-  }
   try {
-    await invoke("backup_db", { targetPath: path });
+    await invoke("backup_db");
     modalTitle.textContent = "Backup Complete";
-    modalMsg.textContent = `Offline database backup successfully created in target directory: ${path}`;
+    modalMsg.textContent = "Offline database backup successfully saved to the selected location.";
     successModal.classList.remove("hidden");
   } catch (err) {
-    alert("Backup failed: " + err);
+    if (err !== "Backup cancelled") {
+      alert("Backup failed: " + err);
+    }
   }
 }
 

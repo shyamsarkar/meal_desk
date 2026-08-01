@@ -2,6 +2,7 @@ mod db;
 
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
+use tauri_plugin_dialog::DialogExt;
 use rusqlite::params;
 use rusqlite::OptionalExtension;
 
@@ -1769,8 +1770,30 @@ pub struct PaymentSummaryReport {
 }
 
 #[tauri::command]
-fn backup_db(target_path: String, state: tauri::State<'_, db::DbPathState>) -> Result<(), String> {
-    std::fs::copy(&state.path, target_path).map(|_| ()).map_err(|e| e.to_string())
+fn backup_db(app: tauri::AppHandle, state: tauri::State<'_, db::DbPathState>) -> Result<(), String> {
+    let db_path = state.path.clone();
+
+    // Build a default filename with a timestamp: mealdesk_backup_YYYYMMDD_HHMMSS.db
+    let now = chrono::Local::now();
+    let default_name = now.format("mealdesk_backup_%Y%m%d_%H%M%S.db").to_string();
+
+    let save_path = app
+        .dialog()
+        .file()
+        .set_title("Save Database Backup")
+        .set_file_name(&default_name)
+        .add_filter("SQLite Database", &["db"])
+        .blocking_save_file();
+
+    match save_path {
+        Some(path) => {
+            let dest = path.to_string();
+            std::fs::copy(&db_path, &dest)
+                .map(|_| ())
+                .map_err(|e| format!("Backup failed: {}", e))
+        }
+        None => Err("Backup cancelled".to_string()),
+    }
 }
 
 #[tauri::command]
@@ -1859,6 +1882,7 @@ fn get_payment_mode_summary(
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let db_path = db::init_db(app.handle())?;
             app.manage(db::DbPathState { path: db_path });
