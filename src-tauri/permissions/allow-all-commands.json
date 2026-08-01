@@ -1,0 +1,47 @@
+{
+  "default": null,
+  "permission": [
+    {
+      "identifier": "allow-all-commands",
+      "description": "Allow all main commands",
+      "commands": {
+        "allow": [
+          "greet",
+          "login",
+          "get_restaurant_info",
+          "update_restaurant_info",
+          "get_categories",
+          "get_products_by_category",
+          "create_order",
+          "update_order",
+          "get_order",
+          "get_active_orders",
+          "cancel_order",
+          "cancel_order_item",
+          "generate_bill",
+          "record_payments",
+          "get_tables",
+          "transfer_table",
+          "merge_tables",
+          "get_active_kots",
+          "update_kot_status",
+          "get_kot_by_id",
+          "get_kots_for_order",
+          "increment_kot_print_count",
+          "upsert_category",
+          "upsert_product",
+          "get_customers",
+          "upsert_customer",
+          "get_sales_report",
+          "backup_db",
+          "restore_db",
+          "get_completed_orders",
+          "get_customer_orders",
+          "get_product_sales_report",
+          "get_payment_mode_summary"
+        ],
+        "deny": []
+      }
+    }
+  ]
+}

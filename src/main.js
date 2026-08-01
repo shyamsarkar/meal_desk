@@ -13,7 +13,7 @@ let activeOrderId = null; // Stored if resuming an existing order
 
 // DOM Elements
 let loginScreen, appScreen, loginForm, usernameInput, passwordInput, loginError;
-let displayUserName, displayUserRole, navItems, panels, activePanelTitle, appClock, restaurantNameHeader;
+let displayUserName, navItems, panels, activePanelTitle, appClock, restaurantNameHeader;
 
 // POS Elements
 let posCategoriesContainer, posProductsContainer, productSearchInput, cartItemsList;
@@ -29,8 +29,7 @@ let kitchenKotGrid;
 // Menu editor elements
 let menuEditorCategories, menuEditorProductsList, addCategoryBtn, addProductBtn;
 
-// Inventory elements
-let inventoryStockList, addPurchaseBtn;
+let activeOrderStatus = null;
 
 // Customer database elements
 let customersList, addCustomerBtn;
@@ -60,7 +59,7 @@ let splitCashAmount, splitUpiAmount, splitCardAmount, splitRemainingTotal;
 let receiptStoreName, receiptStoreAddress, receiptStorePhone, receiptStoreGstin, receiptBillNumber, receiptDate, receiptTable, receiptCashier, receiptCustomerRow, receiptCustomer, receiptItemsBody, receiptSubtotal, receiptDiscount, receiptService, receiptTax, receiptTotal, receiptFooterMsg;
 
 // Cancellation Modal
-let cancelModal, cancelModalTitle, cancelModalItemName, cancelAuthSection, cancelAuthUsername, cancelAuthPassword;
+let cancelModal, cancelModalTitle, cancelModalItemName;
 let cancelQtyGroup, cancelQtyInput, cancelReasonSelect, cancelReasonTextGroup, cancelReasonText, cancelModalCancelBtn, cancelModalSubmitBtn;
 let cancelOrderBtn;
 let activeCancellationTarget = null; // { type: 'item'|'order', itemIndex: number, orderItem: object }
@@ -71,6 +70,19 @@ window.addEventListener("DOMContentLoaded", () => {
   setupEventListeners();
   loadSavedPreferences();
   startClock();
+
+  // Restore saved session if exists
+  const savedUser = localStorage.getItem("mealdesk_user");
+  if (savedUser) {
+    try {
+      const user = JSON.parse(savedUser);
+      if (user && user.username) {
+        handleLoginSuccess(user);
+      }
+    } catch (e) {
+      localStorage.removeItem("mealdesk_user");
+    }
+  }
 });
 
 function initDOMElements() {
@@ -81,7 +93,6 @@ function initDOMElements() {
   passwordInput = document.getElementById("password");
   loginError = document.getElementById("login-error");
   displayUserName = document.getElementById("display-user-name");
-  displayUserRole = document.getElementById("display-user-role");
   navItems = document.querySelectorAll(".nav-item");
   panels = document.querySelectorAll(".panel");
   activePanelTitle = document.getElementById("active-panel-title");
@@ -117,9 +128,7 @@ function initDOMElements() {
   addCategoryBtn = document.getElementById("add-category-btn");
   addProductBtn = document.getElementById("add-product-btn");
 
-  // Inventory
-  inventoryStockList = document.getElementById("inventory-stock-list");
-  addPurchaseBtn = document.getElementById("add-purchase-btn");
+
 
   // Customers
   customersList = document.getElementById("customers-list");
@@ -162,13 +171,7 @@ function initDOMElements() {
   modalMsg = document.getElementById("modal-msg");
   modalCloseBtn = document.getElementById("modal-close-btn");
 
-  holdModal = document.getElementById("hold-modal");
-  holdNameInput = document.getElementById("hold-name-input");
-  holdModalCancel = document.getElementById("hold-modal-cancel");
-  holdModalSave = document.getElementById("hold-modal-save");
-  resumeModal = document.getElementById("resume-modal");
-  resumeModalClose = document.getElementById("resume-modal-close");
-  heldOrdersList = document.getElementById("held-orders-list");
+
 
   itemNotesModal = document.getElementById("item-notes-modal");
   notesProductName = document.getElementById("notes-product-name");
@@ -200,13 +203,7 @@ function initDOMElements() {
   productModalCancel = document.getElementById("product-modal-cancel");
   productModalSave = document.getElementById("product-modal-save");
 
-  purchaseModal = document.getElementById("purchase-modal");
-  purchaseModalProduct = document.getElementById("purchase-modal-product");
-  purchaseModalQty = document.getElementById("purchase-modal-qty");
-  purchaseModalSupplier = document.getElementById("purchase-modal-supplier");
-  purchaseModalCost = document.getElementById("purchase-modal-cost");
-  purchaseModalCancel = document.getElementById("purchase-modal-cancel");
-  purchaseModalSave = document.getElementById("purchase-modal-save");
+
 
   customerModal = document.getElementById("customer-modal");
   customerModalTitle = document.getElementById("customer-modal-title");
@@ -261,9 +258,6 @@ function initDOMElements() {
   cancelModal = document.getElementById("cancel-modal");
   cancelModalTitle = document.getElementById("cancel-modal-title");
   cancelModalItemName = document.getElementById("cancel-modal-item-name");
-  cancelAuthSection = document.getElementById("cancel-auth-section");
-  cancelAuthUsername = document.getElementById("cancel-auth-username");
-  cancelAuthPassword = document.getElementById("cancel-auth-password");
   cancelQtyGroup = document.getElementById("cancel-qty-group");
   cancelQtyInput = document.getElementById("cancel-qty-input");
   cancelReasonSelect = document.getElementById("cancel-reason-select");
@@ -279,19 +273,21 @@ function setupEventListeners() {
   loginForm.addEventListener("submit", async (e) => {
     e.preventDefault();
     loginError.textContent = "";
+    const attemptedUsername = usernameInput.value.trim();
+    const attemptedPassword = passwordInput.value;
+
     try {
-      const user = await invoke("login", { username: usernameInput.value, password: passwordInput.value });
+      const user = await invoke("login", { username: attemptedUsername, password: attemptedPassword });
       handleLoginSuccess(user);
     } catch (err) {
-      loginError.textContent = err;
+      loginError.textContent = typeof err === "string" ? err : "Login failed. Please try again.";
+      console.error("[MealDesk] Login error:", err);
     }
   });
 
   // Navigation Panel Routing
   navItems.forEach(item => {
     item.addEventListener("click", () => {
-      navItems.forEach(nav => nav.classList.remove("active"));
-      item.classList.add("active");
       switchPanel(item.dataset.panel);
     });
   });
@@ -307,24 +303,12 @@ function setupEventListeners() {
   clearCartBtn.addEventListener("click", () => {
     cart = [];
     activeOrderId = null;
+    activeOrderStatus = null;
     cartTableSelect.value = "";
     cartCustomerSelect.value = "";
     renderCart();
     updateSelectColors();
   });
-
-  // Billing Hold/Resume Actions
-  document.getElementById("hold-bill-btn").addEventListener("click", () => {
-    if (cart.length === 0) return;
-    holdNameInput.value = cartTableSelect.value ? `Table ${cartTableSelect.value}` : "";
-    holdModal.classList.remove("hidden");
-  });
-
-  holdModalCancel.addEventListener("click", () => holdModal.classList.add("hidden"));
-  holdModalSave.addEventListener("click", saveHoldBill);
-
-  document.getElementById("resume-bill-btn").addEventListener("click", loadHeldOrders);
-  resumeModalClose.addEventListener("click", () => resumeModal.classList.add("hidden"));
 
   // Checkout modal
   checkoutBtn.addEventListener("click", openCheckoutScreen);
@@ -374,10 +358,7 @@ function setupEventListeners() {
   productModalCancel.addEventListener("click", () => productModal.classList.add("hidden"));
   productModalSave.addEventListener("click", saveProduct);
 
-  // Log inventory Purchase
-  addPurchaseBtn.addEventListener("click", openPurchaseModal);
-  purchaseModalCancel.addEventListener("click", () => purchaseModal.classList.add("hidden"));
-  purchaseModalSave.addEventListener("click", savePurchase);
+
 
   // Customer Management
   addCustomerBtn.addEventListener("click", () => openCustomerModal(null));
@@ -520,8 +501,8 @@ async function performRestore() {
 // Router & State Loads
 async function handleLoginSuccess(user) {
   currentUser = user;
+  localStorage.setItem("mealdesk_user", JSON.stringify(user));
   displayUserName.textContent = user.username.toUpperCase();
-  displayUserRole.textContent = user.role;
 
   // Set default report dates to current month
   const now = new Date();
@@ -545,11 +526,12 @@ async function handleLoginSuccess(user) {
 
   loginScreen.classList.add("hidden");
   appScreen.classList.remove("hidden");
-  switchPanel("pos");
+  await switchPanel("pos");
 }
 
 function handleLogout() {
   currentUser = null;
+  localStorage.removeItem("mealdesk_user");
   usernameInput.value = "";
   passwordInput.value = "";
   loginError.textContent = "";
@@ -588,33 +570,46 @@ async function loadTablesDropdown() {
 }
 
 // Switching View Panels
-function switchPanel(panelId) {
+async function switchPanel(panelId) {
   panels.forEach(p => p.classList.add("hidden"));
-  document.getElementById(`panel-${panelId}`).classList.remove("hidden");
+  const target = document.getElementById(`panel-${panelId}`);
+  if (target) {
+    target.classList.remove("hidden");
+  }
 
-  if (panelId === "pos") {
-    activePanelTitle.textContent = "Billing POS";
-  } else if (panelId === "tables") {
-    activePanelTitle.textContent = "Restaurant Tables";
-    renderTables();
-  } else if (panelId === "kitchen") {
-    activePanelTitle.textContent = "Kitchen Live Display";
-    loadKots();
-  } else if (panelId === "menu-editor") {
-    activePanelTitle.textContent = "Restaurant Menu Management";
-    renderCategoryEditor();
-  } else if (panelId === "inventory") {
-    activePanelTitle.textContent = "Stock Inventory Tracker";
-    renderInventoryList();
-  } else if (panelId === "customers") {
-    activePanelTitle.textContent = "Customer Profiles Directory";
-    renderCustomersList();
-  } else if (panelId === "reports") {
-    activePanelTitle.textContent = "Sales Performance Metrics";
-    generateReport();
-  } else if (panelId === "settings") {
-    activePanelTitle.textContent = "Application Settings";
-    loadSettingsForm();
+  // Update active nav highlight
+  navItems.forEach(nav => {
+    if (nav.dataset.panel === panelId) {
+      nav.classList.add("active");
+    } else {
+      nav.classList.remove("active");
+    }
+  });
+
+  try {
+    if (panelId === "pos") {
+      activePanelTitle.textContent = "Billing POS";
+    } else if (panelId === "tables") {
+      activePanelTitle.textContent = "Restaurant Tables";
+      await renderTables();
+    } else if (panelId === "kitchen") {
+      activePanelTitle.textContent = "Kitchen Live Display";
+      await loadKots();
+    } else if (panelId === "menu-editor") {
+      activePanelTitle.textContent = "Restaurant Menu Management";
+      await renderCategoryEditor();
+    } else if (panelId === "customers") {
+      activePanelTitle.textContent = "Customer Profiles Directory";
+      await renderCustomersList();
+    } else if (panelId === "reports") {
+      activePanelTitle.textContent = "Sales Performance Metrics";
+      await generateReport();
+    } else if (panelId === "settings") {
+      activePanelTitle.textContent = "Application Settings";
+      loadSettingsForm();
+    }
+  } catch (err) {
+    console.error(`[MealDesk] Error loading panel '${panelId}':`, err);
   }
 }
 
@@ -692,8 +687,21 @@ function filterProducts() {
   renderProducts(filtered);
 }
 
+function updateCartHeaderButtons() {
+  if (activeOrderId) {
+    cancelOrderBtn.classList.remove("hidden");
+    clearCartBtn.classList.add("hidden");
+  } else {
+    cancelOrderBtn.classList.add("hidden");
+    clearCartBtn.classList.remove("hidden");
+  }
+}
+
 function addToCart(product) {
-  // Find editable item of same product (where kot_id is null/undefined)
+  if (activeOrderStatus === "Billed" || activeOrderStatus === "Completed") {
+    alert("Order is billed and cannot be modified.");
+    return;
+  }
   const existing = cart.find(item => item.product.id === product.id && !item.kot_id);
   if (existing) {
     existing.quantity += 1;
@@ -708,6 +716,10 @@ function addToCart(product) {
 }
 
 function updateCartQty(productId, change) {
+  if (activeOrderStatus === "Billed" || activeOrderStatus === "Completed") {
+    alert("Order is billed and cannot be modified.");
+    return;
+  }
   const idx = cart.findIndex(item => item.product.id === productId && !item.kot_id);
   if (idx === -1) return;
 
@@ -718,19 +730,23 @@ function updateCartQty(productId, change) {
   renderCart();
 }
 
-function updateCartHeaderButtons() {
-  if (activeOrderId) {
-    cancelOrderBtn.classList.remove("hidden");
-    clearCartBtn.classList.add("hidden");
-  } else {
-    cancelOrderBtn.classList.add("hidden");
-    clearCartBtn.classList.remove("hidden");
-  }
-}
-
 function renderCart() {
   updateCartHeaderButtons();
   cartItemsList.innerHTML = "";
+  
+  const isLocked = activeOrderStatus === "Billed" || activeOrderStatus === "Completed";
+  
+  cartDiscountInput.disabled = isLocked;
+  cartServiceInput.disabled = isLocked;
+  cartCustomerSelect.disabled = isLocked;
+  cartTableSelect.disabled = isLocked;
+  
+  if (isLocked) {
+    document.getElementById("kot-btn").classList.add("hidden");
+  } else {
+    document.getElementById("kot-btn").classList.remove("hidden");
+  }
+
   if (cart.length === 0) {
     cartItemsList.innerHTML = `
       <div class="cart-empty">
@@ -789,7 +805,7 @@ function renderCart() {
       }
     } else {
       // Unlocked (editable) item
-      div.className = "cart-item";
+      div.className = "cart-item" + (isLocked ? " locked" : "");
       div.innerHTML = `
         <div class="cart-item-details" style="cursor: pointer;">
           <div class="cart-item-name">${item.product.name}</div>
@@ -797,16 +813,24 @@ function renderCart() {
           ${item.notes ? `<div style="font-size:0.75rem; color:var(--warning); font-style:italic;">📝 ${item.notes}</div>` : ""}
         </div>
         <div class="cart-item-control">
-          <button class="qty-btn minus">-</button>
-          <span class="cart-item-qty">${item.quantity}</span>
-          <button class="qty-btn plus">+</button>
+          ${isLocked 
+            ? `<span class="cart-item-qty" style="padding-right: 10px;">Qty: ${item.quantity}</span>`
+            : `
+              <button class="qty-btn minus">-</button>
+              <span class="cart-item-qty">${item.quantity}</span>
+              <button class="qty-btn plus">+</button>
+            `
+          }
         </div>
       `;
-      div.querySelector(".minus").addEventListener("click", () => updateCartQty(item.product.id, -1));
-      div.querySelector(".plus").addEventListener("click", () => updateCartQty(item.product.id, 1));
+      if (!isLocked) {
+        div.querySelector(".minus").addEventListener("click", () => updateCartQty(item.product.id, -1));
+        div.querySelector(".plus").addEventListener("click", () => updateCartQty(item.product.id, 1));
+      }
     }
 
     div.querySelector(".cart-item-details").addEventListener("click", () => {
+      if (isLocked) return;
       activeNotesItemIndex = index;
       notesProductName.textContent = item.product.name;
       itemNotesText.value = item.notes;
@@ -838,118 +862,6 @@ function saveItemNotes() {
 }
 
 // Billing Holds
-async function saveHoldBill() {
-  const name = holdNameInput.value.trim();
-  if (!name) return;
-
-  const subtotal = parseFloat(cartSubtotalEl.textContent.replace('₹','')) || 0;
-  const discountPercent = parseFloat(cartDiscountInput.value) || 0;
-  const servicePercent = parseFloat(cartServiceInput.value) || 0;
-  const discountAmount = subtotal * (discountPercent / 100);
-  const serviceAmount = subtotal * (servicePercent / 100);
-  const finalTax = parseFloat(cartTaxEl.textContent.replace('₹','')) || 0;
-  const finalTotal = parseFloat(cartTotalEl.textContent.replace('₹','')) || 0;
-  const roundOff = finalTotal - (subtotal - discountAmount + serviceAmount + finalTax);
-
-  const tableIdVal = cartTableSelect.value ? parseInt(cartTableSelect.value) : null;
-  const custIdVal = cartCustomerSelect.value ? parseInt(cartCustomerSelect.value) : null;
-
-  const orderItemsInput = cart.map(item => ({
-    id: item.id || null,
-    product_id: item.product.id,
-    name: item.product.name,
-    quantity: item.quantity,
-    price: item.product.price,
-    gst_rate: item.product.gst_rate,
-    notes: item.notes || null
-  }));
-
-  try {
-    if (activeOrderId) {
-      await invoke("update_order", {
-        orderId: activeOrderId,
-        tableId: tableIdVal,
-        customerId: custIdVal,
-        subtotal,
-        tax: finalTax,
-        discount: discountPercent,
-        serviceCharge: servicePercent,
-        roundOff,
-        total: finalTotal,
-        status: "Draft",
-        paymentMode: "None",
-        notes: "",
-        holdName: name,
-        items: orderItemsInput,
-        createdAt: new Date().toISOString(),
-        username: currentUser.username
-      });
-    } else {
-      await invoke("create_order", {
-        tableId: tableIdVal,
-        customerId: custIdVal,
-        subtotal,
-        tax: finalTax,
-        discount: discountPercent,
-        serviceCharge: servicePercent,
-        roundOff,
-        total: finalTotal,
-        status: "Draft",
-        paymentMode: "None",
-        notes: "",
-        holdName: name,
-        items: orderItemsInput,
-        createdAt: new Date().toISOString(),
-        username: currentUser.username
-      });
-    }
-
-    holdModal.classList.add("hidden");
-    cart = [];
-    activeOrderId = null;
-    cartTableSelect.value = "";
-    cartCustomerSelect.value = "";
-    renderCart();
-    updateSelectColors();
-
-    modalTitle.textContent = "Bill Placed on Hold";
-    modalMsg.textContent = `Draft details saved successfully under name: ${name}`;
-    successModal.classList.remove("hidden");
-  } catch (err) {
-    alert("Error holding bill: " + err);
-  }
-}
-
-async function loadHeldOrders() {
-  try {
-    const orders = await invoke("get_active_orders");
-    heldOrdersList.innerHTML = "";
-
-    const held = orders.filter(o => o.status === "Draft");
-    if (held.length === 0) {
-      heldOrdersList.innerHTML = `<span style="text-align: center; color:var(--text-muted); padding: 20px 0;">No held orders found</span>`;
-    } else {
-      held.forEach(o => {
-        const item = document.createElement("div");
-        item.className = "category-editor-item";
-        item.style.padding = "12px";
-        item.innerHTML = `
-          <div style="text-align:left;">
-            <div style="font-weight:600; color:var(--primary);">${o.hold_name || `Order #${o.id}`}</div>
-            <div style="font-size:0.75rem; color:var(--text-secondary); margin-top:2px;">Total: ₹${o.total.toFixed(2)} | Table: ${o.table_name || 'None'}</div>
-          </div>
-          <button class="quick-role-btn" style="background:var(--primary); color:white; border:none; padding:4px 8px;">Resume</button>
-        `;
-        item.querySelector("button").addEventListener("click", () => resumeOrder(o.id));
-        heldOrdersList.appendChild(item);
-      });
-    }
-    resumeModal.classList.remove("hidden");
-  } catch (err) {
-    console.error(err);
-  }
-}
-
 async function resumeOrder(orderId) {
   try {
     const orderData = await invoke("get_order", { orderId });
@@ -975,30 +887,77 @@ async function resumeOrder(orderId) {
     cartTableSelect.value = orderData.header.table_id || "";
 
     activeOrderId = orderId;
+    activeOrderStatus = orderData.header.status;
     updateSelectColors();
     renderCart();
-    
-    resumeModal.classList.add("hidden");
   } catch (err) {
     alert("Error resuming order: " + err);
   }
 }
 
 // Checkout Screens
-function openCheckoutScreen() {
+async function openCheckoutScreen() {
+  if (cart.length === 0) return;
+
+  const subtotal = parseFloat(cartSubtotalEl.textContent.replace('₹','')) || 0;
+  const discountPercent = parseFloat(cartDiscountInput.value) || 0;
+  const servicePercent = parseFloat(cartServiceInput.value) || 0;
+  const discountAmount = subtotal * (discountPercent / 100);
+  const serviceAmount = subtotal * (servicePercent / 100);
+  const finalTax = parseFloat(cartTaxEl.textContent.replace('₹','')) || 0;
+  const finalTotal = parseFloat(cartTotalEl.textContent.replace('₹','')) || 0;
+
+  const tableIdVal = cartTableSelect.value ? parseInt(cartTableSelect.value) : null;
+  const custIdVal = cartCustomerSelect.value ? parseInt(cartCustomerSelect.value) : null;
+
+  const orderItemsInput = cart.map(item => ({
+    id: item.id || null,
+    product_id: item.product.id,
+    name: item.product.name,
+    quantity: item.quantity,
+    price: item.product.price,
+    gst_rate: item.product.gst_rate,
+    notes: item.notes || null
+  }));
+
   try {
-    if (cart.length === 0) return;
+    let orderId = activeOrderId;
+    
+    // Save or update the order first
+    if (activeOrderId) {
+      await invoke("update_order", {
+        orderId: activeOrderId,
+        tableId: tableIdVal,
+        customerId: custIdVal,
+        notes: "",
+        items: orderItemsInput,
+        createdAt: new Date().toISOString(),
+        username: currentUser.username
+      });
+    } else {
+      orderId = await invoke("create_order", {
+        tableId: tableIdVal,
+        customerId: custIdVal,
+        notes: "",
+        items: orderItemsInput,
+        createdAt: new Date().toISOString(),
+        username: currentUser.username
+      });
+      activeOrderId = orderId;
+    }
 
-    const subtotal = parseFloat(cartSubtotalEl.textContent.replace('₹','')) || 0;
-    const discountPercent = parseFloat(cartDiscountInput.value) || 0;
-    const servicePercent = parseFloat(cartServiceInput.value) || 0;
-    const discountAmount = subtotal * (discountPercent / 100);
-    const serviceAmount = subtotal * (servicePercent / 100);
-    const finalTax = parseFloat(cartTaxEl.textContent.replace('₹','')) || 0;
-    const finalTotal = parseFloat(cartTotalEl.textContent.replace('₹','')) || 0;
+    // Generate the bill on the backend
+    const orderHeader = await invoke("generate_bill", {
+      orderId: orderId,
+      discount: discountPercent,
+      serviceCharge: servicePercent,
+      username: currentUser.username
+    });
 
-    // Modals inputs reset
-    checkoutModalAmount.textContent = `₹${finalTotal.toFixed(2)}`;
+    activeOrderStatus = "Billed";
+
+    // Modals inputs reset using totals from backend
+    checkoutModalAmount.textContent = `₹${orderHeader.total.toFixed(2)}`;
     checkoutPaymentMode.value = "Cash";
     checkoutCashReceived.value = "";
     checkoutChangeAmount.textContent = "₹0.00";
@@ -1010,31 +969,29 @@ function openCheckoutScreen() {
     splitCashAmount.value = 0;
     splitUpiAmount.value = 0;
     splitCardAmount.value = 0;
-    splitRemainingTotal.textContent = `₹${finalTotal.toFixed(2)}`;
+    splitRemainingTotal.textContent = `₹${orderHeader.total.toFixed(2)}`;
 
-    // Print templates
+    // Populate print template
     receiptStoreName.textContent = (restaurantInfo && restaurantInfo.name) ? restaurantInfo.name.toUpperCase() : "MEALDESK BISTRO";
     receiptStoreAddress.textContent = (restaurantInfo && restaurantInfo.address) ? restaurantInfo.address : "";
     receiptStorePhone.textContent = (restaurantInfo && restaurantInfo.phone) ? `Ph: ${restaurantInfo.phone}` : "";
     receiptStoreGstin.textContent = (restaurantInfo && restaurantInfo.gstin) ? `GSTIN: ${restaurantInfo.gstin}` : "";
-    receiptBillNumber.textContent = activeOrderId ? `#${activeOrderId}` : "New Bill";
+    receiptBillNumber.textContent = `#${orderHeader.id}`;
     
-    const now = new Date();
+    const now = new Date(orderHeader.created_at);
     receiptDate.textContent = now.toLocaleDateString([], { day: '2-digit', month: 'short', year: 'numeric' }) + " " + now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     
-    const activeTableOpt = cartTableSelect.options[cartTableSelect.selectedIndex];
-    receiptTable.textContent = activeTableOpt ? activeTableOpt.text : "No Table";
+    receiptTable.textContent = orderHeader.table_name || "No Table";
     receiptCashier.textContent = currentUser ? currentUser.username : "Cashier";
 
-    const activeCustOpt = cartCustomerSelect.options[cartCustomerSelect.selectedIndex];
-    if (activeCustOpt && cartCustomerSelect.value) {
+    if (orderHeader.customer_name) {
       receiptCustomerRow.classList.remove("hidden");
-      receiptCustomer.textContent = activeCustOpt.text;
+      receiptCustomer.textContent = orderHeader.customer_name;
     } else {
       receiptCustomerRow.classList.add("hidden");
     }
 
-    // Table details
+    // Populate items in the receipt
     receiptItemsBody.innerHTML = "";
     
     const consolidated = {};
@@ -1071,23 +1028,28 @@ function openCheckoutScreen() {
       receiptItemsBody.appendChild(tr);
     });
 
-    receiptSubtotal.textContent = `₹${subtotal.toFixed(2)}`;
-    receiptDiscount.textContent = `-₹${discountAmount.toFixed(2)}`;
-    receiptService.textContent = `₹${serviceAmount.toFixed(2)}`;
-    receiptTax.textContent = `₹${finalTax.toFixed(2)}`;
-    receiptTotal.textContent = `₹${finalTotal.toFixed(2)}`;
+    const billDiscountAmount = orderHeader.subtotal * (orderHeader.discount / 100);
+    const billServiceAmount = orderHeader.subtotal * (orderHeader.service_charge / 100);
+
+    receiptSubtotal.textContent = `₹${orderHeader.subtotal.toFixed(2)}`;
+    receiptDiscount.textContent = `-₹${billDiscountAmount.toFixed(2)}`;
+    receiptService.textContent = `₹${billServiceAmount.toFixed(2)}`;
+    receiptTax.textContent = `₹${orderHeader.tax.toFixed(2)}`;
+    receiptTotal.textContent = `₹${orderHeader.total.toFixed(2)}`;
     receiptFooterMsg.textContent = (restaurantInfo && restaurantInfo.receipt_footer) ? restaurantInfo.receipt_footer : "Thank you for dining with us!";
 
     checkoutModal.classList.remove("hidden");
+    
+    renderCart();
   } catch (err) {
-    alert("Error opening checkout screen: " + err + "\n" + err.stack);
+    alert("Error opening checkout screen: " + err);
     console.error(err);
   }
 }
 
 function handlePaymentModeChange() {
   const mode = checkoutPaymentMode.value;
-  const originalTotal = parseFloat(cartTotalEl.textContent.replace('₹','')) || 0;
+  const originalTotal = parseFloat(checkoutModalAmount.textContent.replace('₹','')) || 0;
 
   if (mode === "NC") {
     receiptTotal.textContent = "₹0.00";
@@ -1146,80 +1108,59 @@ function calculateSplitPortions() {
 
 async function finalizeTransaction() {
   const paymentMode = checkoutPaymentMode.value;
-  const subtotal = parseFloat(cartSubtotalEl.textContent.replace('₹','')) || 0;
-  const discountPercent = parseFloat(cartDiscountInput.value) || 0;
-  const servicePercent = parseFloat(cartServiceInput.value) || 0;
-  const discountAmount = subtotal * (discountPercent / 100);
-  const serviceAmount = subtotal * (servicePercent / 100);
-  const finalTax = parseFloat(cartTaxEl.textContent.replace('₹','')) || 0;
-  
-  const isNC = paymentMode === "NC";
-  const finalTotal = isNC ? 0.0 : (parseFloat(cartTotalEl.textContent.replace('₹','')) || 0);
-  const roundOff = isNC ? -(subtotal - discountAmount + serviceAmount + finalTax) : (finalTotal - (subtotal - discountAmount + serviceAmount + finalTax));
+  let paymentsList = [];
+  const billTotalVal = parseFloat(checkoutModalAmount.textContent.replace('₹','')) || 0;
 
-  const tableIdVal = cartTableSelect.value ? parseInt(cartTableSelect.value) : null;
-  const custIdVal = cartCustomerSelect.value ? parseInt(cartCustomerSelect.value) : null;
-
-  const orderItemsInput = cart.map(item => ({
-    id: item.id || null,
-    product_id: item.product.id,
-    name: item.product.name,
-    quantity: item.quantity,
-    price: item.product.price,
-    gst_rate: item.product.gst_rate,
-    notes: item.notes || null
-  }));
+  if (paymentMode === "Cash") {
+    const received = parseFloat(checkoutCashReceived.value) || billTotalVal;
+    paymentsList.push({
+      payment_method: "Cash",
+      amount: received
+    });
+  } else if (paymentMode === "UPI") {
+    paymentsList.push({
+      payment_method: "UPI",
+      amount: billTotalVal
+    });
+  } else if (paymentMode === "Card") {
+    paymentsList.push({
+      payment_method: "Card",
+      amount: billTotalVal
+    });
+  } else if (paymentMode === "NC") {
+    paymentsList.push({
+      payment_method: "NC",
+      amount: 0.0
+    });
+  } else if (paymentMode === "Mixed") {
+    const cash = parseFloat(splitCashAmount.value) || 0;
+    const upi = parseFloat(splitUpiAmount.value) || 0;
+    const card = parseFloat(splitCardAmount.value) || 0;
+    
+    if (cash > 0) paymentsList.push({ payment_method: "Cash", amount: cash });
+    if (upi > 0) paymentsList.push({ payment_method: "UPI", amount: upi });
+    if (card > 0) paymentsList.push({ payment_method: "Card", amount: card });
+  }
 
   try {
-    let finalOrderId = activeOrderId;
-    if (activeOrderId) {
-      await invoke("update_order", {
-        orderId: activeOrderId,
-        tableId: tableIdVal,
-        customerId: custIdVal,
-        subtotal,
-        tax: finalTax,
-        discount: discountPercent,
-        serviceCharge: servicePercent,
-        roundOff,
-        total: finalTotal,
-        status: "Completed",
-        paymentMode: paymentMode,
-        notes: "",
-        holdName: "",
-        items: orderItemsInput,
-        createdAt: new Date().toISOString(),
-        username: currentUser.username
-      });
-    } else {
-      finalOrderId = await invoke("create_order", {
-        tableId: tableIdVal,
-        customerId: custIdVal,
-        subtotal,
-        tax: finalTax,
-        discount: discountPercent,
-        serviceCharge: servicePercent,
-        roundOff,
-        total: finalTotal,
-        status: "Completed",
-        paymentMode: paymentMode,
-        notes: "",
-        holdName: "",
-        items: orderItemsInput,
-        createdAt: new Date().toISOString(),
-        username: currentUser.username
-      });
-    }
+    await invoke("record_payments", {
+      orderId: activeOrderId,
+      payments: paymentsList,
+      username: currentUser.username
+    });
 
-    // Check if printer is set to system, and trigger browser print dialog
     const printerMode = localStorage.getItem("printer_pref") || "simulated";
     if (printerMode === "system") {
       window.print();
     }
 
+    // Capture order ID before clearing state
+    const completedOrderId = activeOrderId;
+
     checkoutModal.classList.add("hidden");
     cart = [];
     activeOrderId = null;
+    activeOrderStatus = null;
     cartTableSelect.value = "";
     cartCustomerSelect.value = "";
     renderCart();
@@ -1229,8 +1170,8 @@ async function finalizeTransaction() {
     
     modalTitle.textContent = "Bill Completed Successfully";
     modalMsg.innerHTML = `
-      <strong>Invoice ID: #${finalOrderId}</strong><br/>
-      Total billing amount: ₹${finalTotal.toFixed(2)} (${paymentMode})<br/>
+      <strong>Invoice ID: #${completedOrderId}</strong><br/>
+      Total billing amount: ₹${billTotalVal.toFixed(2)} (${paymentMode})<br/>
       Receipt printed successfully.
     `;
     successModal.classList.remove("hidden");
@@ -1253,7 +1194,7 @@ async function renderTables() {
       card.innerHTML = `
         <div class="table-number">${t.name}</div>
         <div class="table-status-label">${t.status}</div>
-        ${t.current_order_hold_name ? `<div style="font-size:0.75rem; color:var(--text-secondary);">${t.current_order_hold_name}</div>` : ""}
+
         ${t.current_order_total ? `<div style="font-size:0.85rem; font-weight:600; color:var(--accent);">₹${t.current_order_total.toFixed(2)}</div>` : ""}
       `;
 
@@ -1585,87 +1526,7 @@ async function saveProduct() {
   }
 }
 
-// 5. Inventory Operations
-async function renderInventoryList() {
-  inventoryStockList.innerHTML = "";
-  try {
-    const list = await invoke("get_inventory");
-    if (list.length === 0) {
-      inventoryStockList.innerHTML = `<tr><td colspan="5" style="text-align:center; color:var(--text-muted); padding:30px;">No inventory items registered</td></tr>`;
-      return;
-    }
 
-    list.forEach(inv => {
-      let statusClass = "in-stock";
-      let statusText = "In Stock";
-      
-      if (inv.stock_qty <= 0) {
-        statusClass = "out-of-stock";
-        statusText = "Out of Stock";
-      } else if (inv.stock_qty <= inv.low_stock_threshold) {
-        statusClass = "low-stock";
-        statusText = "Low Stock";
-      }
-
-      const tr = document.createElement("tr");
-      tr.innerHTML = `
-        <td style="padding:12px 16px;">${inv.product_name}</td>
-        <td style="padding:12px 16px;">${inv.category_name}</td>
-        <td style="padding:12px 16px;">₹${inv.price.toFixed(2)}</td>
-        <td style="padding:12px 16px; font-weight:700;">${inv.stock_qty}</td>
-        <td style="padding:12px 16px;"><span class="status-badge ${statusClass}">${statusText}</span></td>
-      `;
-      inventoryStockList.appendChild(tr);
-    });
-  } catch (err) {
-    console.error(err);
-  }
-}
-
-async function openPurchaseModal() {
-  try {
-    const allCategories = await invoke("get_categories");
-    purchaseModalProduct.innerHTML = "";
-    
-    for (const c of allCategories) {
-      const catProds = await invoke("get_products_by_category", { categoryId: c.id });
-      catProds.forEach(p => {
-        purchaseModalProduct.innerHTML += `<option value="${p.id}">${p.name}</option>`;
-      });
-    }
-
-    purchaseModalQty.value = "";
-    purchaseModalSupplier.value = "";
-    purchaseModalCost.value = "";
-    purchaseModal.classList.remove("hidden");
-  } catch (err) {
-    console.error(err);
-  }
-}
-
-async function savePurchase() {
-  const prodId = parseInt(purchaseModalProduct.value);
-  const qty = parseInt(purchaseModalQty.value) || 0;
-  const supplier = purchaseModalSupplier.value.trim();
-  const cost = parseFloat(purchaseModalCost.value) || 0;
-
-  if (!prodId || qty <= 0 || cost <= 0) return;
-
-  try {
-    await invoke("add_purchase", {
-      productId: prodId,
-      quantity: qty,
-      supplier: supplier || null,
-      unitPrice: cost,
-      date: new Date().toISOString()
-    });
-    
-    purchaseModal.classList.add("hidden");
-    renderInventoryList();
-  } catch (err) {
-    alert("Error logging stock purchase: " + err);
-  }
-}
 
 // 6. Customer Profiles
 async function renderCustomersList() {
@@ -1947,24 +1808,8 @@ async function saveSettings(e) {
 async function sendKot() {
   if (cart.length === 0) return;
 
-  const subtotal = parseFloat(cartSubtotalEl.textContent.replace('₹','')) || 0;
-  const discountPercent = parseFloat(cartDiscountInput.value) || 0;
-  const servicePercent = parseFloat(cartServiceInput.value) || 0;
-  const discountAmount = subtotal * (discountPercent / 100);
-  const serviceAmount = subtotal * (servicePercent / 100);
-  const finalTax = parseFloat(cartTaxEl.textContent.replace('₹','')) || 0;
-  const finalTotal = parseFloat(cartTotalEl.textContent.replace('₹','')) || 0;
-  const roundOff = finalTotal - (subtotal - discountAmount + serviceAmount + finalTax);
-
   const tableIdVal = cartTableSelect.value ? parseInt(cartTableSelect.value) : null;
   const custIdVal = cartCustomerSelect.value ? parseInt(cartCustomerSelect.value) : null;
-
-  let name = "";
-  if (tableIdVal) {
-    name = cartTableSelect.options[cartTableSelect.selectedIndex].text;
-  } else {
-    name = "Takeaway";
-  }
 
   const orderItemsInput = cart.map(item => ({
     id: item.id || null,
@@ -1983,16 +1828,7 @@ async function sendKot() {
         orderId: activeOrderId,
         tableId: tableIdVal,
         customerId: custIdVal,
-        subtotal,
-        tax: finalTax,
-        discount: discountPercent,
-        serviceCharge: servicePercent,
-        roundOff,
-        total: finalTotal,
-        status: "Pending",
-        paymentMode: "None",
         notes: "",
-        holdName: name,
         items: orderItemsInput,
         createdAt: new Date().toISOString(),
         username: currentUser.username
@@ -2001,21 +1837,15 @@ async function sendKot() {
       orderId = await invoke("create_order", {
         tableId: tableIdVal,
         customerId: custIdVal,
-        subtotal,
-        tax: finalTax,
-        discount: discountPercent,
-        serviceCharge: servicePercent,
-        roundOff,
-        total: finalTotal,
-        status: "Pending",
-        paymentMode: "None",
         notes: "",
-        holdName: name,
         items: orderItemsInput,
         createdAt: new Date().toISOString(),
         username: currentUser.username
       });
+      activeOrderId = orderId;
     }
+
+    activeOrderStatus = "Pending";
 
     // Print the generated KOT
     const kots = await invoke("get_kots_for_order", { orderId: orderId || activeOrderId });
@@ -2029,15 +1859,17 @@ async function sendKot() {
     }
 
     // Reset cart UI
+    const sentOrderId = orderId || activeOrderId;
     cart = [];
     activeOrderId = null;
+    activeOrderStatus = null;
     cartTableSelect.value = "";
     cartCustomerSelect.value = "";
     renderCart();
     updateSelectColors();
 
     modalTitle.textContent = "KOT Sent to Kitchen";
-    modalMsg.textContent = `Order #${orderId || activeOrderId} saved as Pending and sent to kitchen successfully.`;
+    modalMsg.textContent = `Order #${sentOrderId} saved as Pending and sent to kitchen successfully.`;
     successModal.classList.remove("hidden");
 
     loadKots();
@@ -2116,19 +1948,7 @@ function openCancellationModal(target) {
   cancelReasonTextGroup.classList.add("hidden");
   cancelReasonText.required = false;
   
-  cancelAuthUsername.value = "";
-  cancelAuthPassword.value = "";
-  
-  // Authorization visibility
-  if (currentUser.role.toLowerCase() === 'cashier') {
-    cancelAuthSection.classList.remove("hidden");
-    cancelAuthUsername.required = true;
-    cancelAuthPassword.required = true;
-  } else {
-    cancelAuthSection.classList.add("hidden");
-    cancelAuthUsername.required = false;
-    cancelAuthPassword.required = false;
-  }
+  // Authorization visibility (none required, single admin has full permissions)
   
   if (target.type === 'item') {
     const item = cart[target.itemIndex];
@@ -2160,30 +1980,6 @@ async function submitCancellation() {
   }
   
   let authorizer = currentUser.username;
-  if (currentUser.role.toLowerCase() === 'cashier') {
-    const authUser = cancelAuthUsername.value.trim();
-    const authPass = cancelAuthPassword.value.trim();
-    if (!authUser || !authPass) {
-      alert("Manager/Owner approval credentials are required.");
-      return;
-    }
-    
-    try {
-      const isValid = await invoke("verify_credentials", {
-        username: authUser,
-        password: authPass,
-        requiredRoles: ["Owner", "Manager"]
-      });
-      if (!isValid) {
-        alert("Invalid credentials or insufficient permissions. Authorization denied.");
-        return;
-      }
-      authorizer = authUser;
-    } catch (err) {
-      alert("Authorization error: " + err);
-      return;
-    }
-  }
   
   try {
     if (activeCancellationTarget.type === 'item') {
@@ -2223,6 +2019,7 @@ async function submitCancellation() {
       
       cart = [];
       activeOrderId = null;
+      activeOrderStatus = null;
       cartTableSelect.value = "";
       cartCustomerSelect.value = "";
       renderCart();

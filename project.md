@@ -24,8 +24,7 @@ MealDesk is a desktop restaurant billing (POS) application built with
 
 ### Authentication
 
--   Login
--   Roles: Owner, Manager, Cashier
+-   Login (admin/admin123)
 
 ### Restaurant
 

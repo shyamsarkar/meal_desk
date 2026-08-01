@@ -35,15 +35,13 @@ To run the application locally in development mode:
 
 ---
 
-## 🔑 Default Login Accounts
+## 🔑 Default Login Account
 
-The database is pre-seeded with three default user roles. You can log in using these credentials:
+The database is pre-seeded with a single default administrator account:
 
-| Username | Password | Role | Description |
-| :--- | :--- | :--- | :--- |
-| **`owner`** | `owner123` | **Owner** | Full dashboard control and settings access |
-| **`manager`** | `manager123` | **Manager** | Full POS control, category/product management |
-| **`cashier`** | `cashier123` | **Cashier** | Billing and checkouts only |
+| Username | Password | Access |
+| :--- | :--- | :--- |
+| **`admin`** | `admin123` | Full application access |
 
 ---
 

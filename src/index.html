@@ -13,7 +13,7 @@
           invoke: async (cmd, args) => {
             console.log("Mock invoke:", cmd, args);
             if (cmd === "login") {
-              return { username: "cashier", role: "Cashier" };
+              return { username: "admin" };
             }
             if (cmd === "get_restaurant_info") {
               return {
@@ -94,8 +94,7 @@
         <span class="sidebar-brand">MealDesk</span>
       </div>
       <div class="sidebar-user">
-        <span id="display-user-name" class="user-name">Cashier</span>
-        <span id="display-user-role" class="user-role">Cashier</span>
+        <span id="display-user-name" class="user-name">Admin</span>
       </div>
       <nav class="sidebar-nav">
         <div class="nav-item active" data-panel="pos">
@@ -114,10 +113,7 @@
           <span class="nav-icon">🍔</span>
           <span>Menu Editor</span>
         </div>
-        <div class="nav-item" data-panel="inventory">
-          <span class="nav-icon">📦</span>
-          <span>Inventory</span>
-        </div>
+
         <div class="nav-item" data-panel="customers">
           <span class="nav-icon">👥</span>
           <span>Customers</span>
@@ -181,8 +177,7 @@
               <span class="cart-title">Current Order</span>
               <div style="display: flex; gap: 4px;">
                 <button id="kot-btn" class="quick-role-btn" style="background: var(--accent); color: black; border-color: var(--accent);">KOT</button>
-                <button id="hold-bill-btn" class="quick-role-btn">Hold</button>
-                <button id="resume-bill-btn" class="quick-role-btn">Resume</button>
+
                 <button id="clear-cart-btn" class="quick-role-btn"
                   style="color: var(--danger); border-color: rgba(239, 68, 68, 0.2);">Clear</button>
                 <button id="cancel-order-btn" class="quick-role-btn hidden"
@@ -193,7 +188,7 @@
             <!-- Customer Selection & Table Selection -->
             <div style="padding: 10px 16px; border-bottom: 1px solid var(--border); display: flex; gap: 8px;">
               <select id="cart-customer-select" class="form-input" style="padding: 6px; font-size: 0.85rem; flex: 1;">
-                <option value="">Walk-in Customer shyam</option>
+                <option value="">Walk-in Customer</option>
               </select>
               <select id="cart-table-select" class="form-input" style="padding: 6px; font-size: 0.85rem; width: 100px;">
                 <option value="">No Table</option>
@@ -309,31 +304,7 @@
         </div>
       </div>
 
-      <!-- 5. Inventory Panel -->
-      <div id="panel-inventory" class="panel hidden">
-        <div class="tables-container" style="padding: 24px; display: flex; flex-direction: column; gap: 20px;">
-          <div style="display: flex; justify-content: space-between; align-items: center;">
-            <h2 style="font-size: 1.3rem;">Inventory Stock Levels</h2>
-            <button id="add-purchase-btn" class="auth-btn" style="margin:0; width:auto; padding: 8px 16px;">Log Purchase
-              (Add Stock)</button>
-          </div>
-          <div class="settings-card" style="margin:0; padding:0; overflow:hidden;">
-            <table style="width: 100%; border-collapse: collapse; text-align: left;">
-              <thead>
-                <tr
-                  style="border-bottom: 1px solid var(--border); color: var(--text-secondary); background: rgba(0,0,0,0.15);">
-                  <th style="padding: 12px 16px;">Product Name</th>
-                  <th style="padding: 12px 16px;">Category</th>
-                  <th style="padding: 12px 16px;">Unit Price</th>
-                  <th style="padding: 12px 16px;">Stock Qty</th>
-                  <th style="padding: 12px 16px;">Status</th>
-                </tr>
-              </thead>
-              <tbody id="inventory-stock-list"></tbody>
-            </table>
-          </div>
-        </div>
-      </div>
+
 
       <!-- 6. Customers Panel -->
       <div id="panel-customers" class="panel hidden">
@@ -565,31 +536,7 @@
 
   <!-- Modals Layout -->
 
-  <!-- Hold Order Modal -->
-  <div id="hold-modal" class="modal-overlay hidden">
-    <div class="modal-content">
-      <h3 class="modal-title">Hold Current Order</h3>
-      <p class="modal-desc">Provide a name or table reference to hold this bill draft.</p>
-      <div class="form-group">
-        <input type="text" id="hold-name-input" class="form-input" placeholder="e.g. Table 5 / Shyam" required />
-      </div>
-      <div style="display: flex; gap: 10px;">
-        <button id="hold-modal-cancel" class="modal-btn" style="flex:1; background: var(--bg-hover);">Cancel</button>
-        <button id="hold-modal-save" class="modal-btn" style="flex:1;">Hold Bill</button>
-      </div>
-    </div>
-  </div>
 
-  <!-- Resume Order Modal -->
-  <div id="resume-modal" class="modal-overlay hidden">
-    <div class="modal-content" style="max-width: 500px;">
-      <h3 class="modal-title">Resume Held Orders</h3>
-      <div id="held-orders-list"
-        style="max-height: 300px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; margin: 15px 0;">
-      </div>
-      <button id="resume-modal-close" class="modal-btn" style="background: var(--bg-hover);">Close</button>
-    </div>
-  </div>
 
   <!-- Item Notes Modal -->
   <div id="item-notes-modal" class="modal-overlay hidden">
@@ -683,33 +630,7 @@
     </div>
   </div>
 
-  <!-- Log Purchase Inventory Modal -->
-  <div id="purchase-modal" class="modal-overlay hidden">
-    <div class="modal-content">
-      <h3 class="modal-title">Record Stock Purchase</h3>
-      <div class="form-group" style="text-align: left;">
-        <label class="form-label">Select Product</label>
-        <select id="purchase-modal-product" class="form-input" required></select>
-      </div>
-      <div class="form-group" style="text-align: left;">
-        <label class="form-label">Purchase Quantity</label>
-        <input type="number" id="purchase-modal-qty" min="1" class="form-input" required />
-      </div>
-      <div class="form-group" style="text-align: left;">
-        <label class="form-label">Supplier Name</label>
-        <input type="text" id="purchase-modal-supplier" class="form-input" placeholder="e.g. Metro Wholesale" />
-      </div>
-      <div class="form-group" style="text-align: left;">
-        <label class="form-label">Supplier Unit Cost (₹)</label>
-        <input type="number" id="purchase-modal-cost" step="0.01" min="0" class="form-input" required />
-      </div>
-      <div style="display: flex; gap: 10px; margin-top: 10px;">
-        <button id="purchase-modal-cancel" class="modal-btn"
-          style="flex:1; background: var(--bg-hover);">Cancel</button>
-        <button id="purchase-modal-save" class="modal-btn" style="flex:1;">Log Stock</button>
-      </div>
-    </div>
-  </div>
+
 
   <!-- Customer Modal -->
   <div id="customer-modal" class="modal-overlay hidden">
@@ -901,18 +822,7 @@
       <h3 id="cancel-modal-title" class="modal-title">Cancel Item</h3>
       <p id="cancel-modal-item-name" class="modal-desc" style="font-weight:600; color: var(--danger);"></p>
       
-      <!-- Authorization credentials form (shown dynamically for Cashiers) -->
-      <div id="cancel-auth-section" class="hidden" style="border: 1px solid var(--border); padding: 12px; border-radius: 6px; margin-bottom: 12px; background: rgba(255,255,255,0.02);">
-        <div style="font-size: 0.8rem; font-weight: bold; margin-bottom: 8px; color: var(--warning);">Manager/Owner Approval Required</div>
-        <div class="form-group" style="text-align: left;">
-          <label class="form-label" style="font-size: 0.75rem;">Username</label>
-          <input type="text" id="cancel-auth-username" class="form-input" placeholder="Enter manager/owner username" style="padding: 6px 10px; font-size: 0.85rem;" />
-        </div>
-        <div class="form-group" style="margin-bottom: 0; text-align: left;">
-          <label class="form-label" style="font-size: 0.75rem;">Password</label>
-          <input type="password" id="cancel-auth-password" class="form-input" placeholder="Enter password" style="padding: 6px 10px; font-size: 0.85rem;" />
-        </div>
-      </div>
+
 
       <div class="form-group" id="cancel-qty-group" style="text-align: left;">
         <label class="form-label">Quantity to Cancel</label>

@@ -3,12 +3,12 @@ mod db;
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
 use rusqlite::params;
+use rusqlite::OptionalExtension;
 
 // Data Structures
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct UserInfo {
     pub username: String,
-    pub role: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -67,7 +67,6 @@ pub struct OrderHeader {
     pub status: String,
     pub payment_mode: Option<String>,
     pub notes: Option<String>,
-    pub hold_name: Option<String>,
     pub created_at: String,
     pub cancelled_by: Option<String>,
     pub cancelled_at: Option<String>,
@@ -101,7 +100,6 @@ pub struct TableDetails {
     pub merged_into: Option<i64>,
     pub current_order_id: Option<i64>,
     pub current_order_total: Option<f64>,
-    pub current_order_hold_name: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -125,16 +123,6 @@ pub struct KotOutput {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct InventoryOutput {
-    pub product_id: i64,
-    pub product_name: String,
-    pub category_name: String,
-    pub price: f64,
-    pub stock_qty: i64,
-    pub low_stock_threshold: i64,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct CustomerDetails {
     pub id: i64,
     pub name: String,
@@ -149,6 +137,12 @@ pub struct SalesReportOutput {
     pub total_tax: f64,
     pub order_count: i64,
     pub average_ticket: f64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PaymentInput {
+    pub payment_method: String,
+    pub amount: f64,
 }
 
 // Commands
@@ -179,52 +173,55 @@ fn log_audit(
 }
 
 #[tauri::command]
-fn verify_credentials(
-    username: String,
-    password: Option<String>,
-    required_roles: Vec<String>,
-    state: tauri::State<'_, db::DbPathState>,
-) -> Result<bool, String> {
-    let conn = rusqlite::Connection::open(&state.path).map_err(|e| e.to_string())?;
-    let password = password.unwrap_or_default();
-    let hashed = db::hash_password(&password);
-    
-    let mut stmt = conn
-        .prepare("SELECT role FROM users WHERE username = ?1 AND password_hash = ?2")
-        .map_err(|e| e.to_string())?;
-    
-    let role: Result<String, _> = stmt.query_row([username, hashed], |row| row.get(0));
-    match role {
-        Ok(r) => Ok(required_roles.contains(&r)),
-        Err(_) => Ok(false),
-    }
-}
-
-#[tauri::command]
 fn login(
     username: String,
-    password: Option<String>,
+    password: String,
     state: tauri::State<'_, db::DbPathState>,
 ) -> Result<UserInfo, String> {
     let conn = rusqlite::Connection::open(&state.path).map_err(|e| e.to_string())?;
-    let password = password.unwrap_or_default();
+    let username_trimmed = username.trim().to_string();
     let hashed = db::hash_password(&password);
-    
+
     let mut stmt = conn
-        .prepare("SELECT username, role FROM users WHERE username = ?1 AND password_hash = ?2")
+        .prepare("SELECT username FROM users WHERE LOWER(username) = LOWER(?1) AND password_hash = ?2")
         .map_err(|e| e.to_string())?;
-    
-    let user_info = stmt
-        .query_row([username, hashed], |row| {
+
+    let result = stmt.query_row(
+        rusqlite::params![username_trimmed, hashed],
+        |row| {
             Ok(UserInfo {
                 username: row.get(0)?,
-                role: row.get(1)?,
             })
-        })
-        .map_err(|e| format!("Invalid username or password: {}", e))?;
-        
-    Ok(user_info)
+        },
+    );
+
+    match result {
+        Ok(user_info) => {
+            // Log successful login to audit_logs
+            let now = get_db_timestamp(&conn);
+            let _ = conn.execute(
+                "INSERT INTO audit_logs (username, action, target_type, target_id, details, created_at)
+                 VALUES (?1, 'login_success', 'users', NULL, 'Login successful', ?2)",
+                rusqlite::params![user_info.username, now],
+            );
+            eprintln!("[MealDesk] Login success for user: {}", user_info.username);
+            Ok(user_info)
+        }
+        Err(e) => {
+            // Log failed attempt to audit_logs — always works even for unknown usernames
+            let now = get_db_timestamp(&conn);
+            let details = format!("Failed login attempt for username: '{}'. Error: {}", username_trimmed, e);
+            let _ = conn.execute(
+                "INSERT INTO audit_logs (username, action, target_type, target_id, details, created_at)
+                 VALUES (?1, 'login_failed', 'users', NULL, ?2, ?3)",
+                rusqlite::params![username_trimmed, details, now],
+            );
+            eprintln!("[MealDesk] Login FAILED for username: '{}' — {}", username_trimmed, e);
+            Err("Invalid username or password.".to_string())
+        }
+    }
 }
+
 
 #[tauri::command]
 fn get_restaurant_info(state: tauri::State<'_, db::DbPathState>) -> Result<RestaurantInfo, String> {
@@ -323,21 +320,12 @@ fn get_products_by_category(
     Ok(products)
 }
 
-// Advanced Billing & Holds
+// Advanced Billing
 #[tauri::command]
 fn create_order(
     table_id: Option<i64>,
     customer_id: Option<i64>,
-    subtotal: f64,
-    tax: f64,
-    discount: f64,
-    service_charge: f64,
-    round_off: f64,
-    total: f64,
-    status: String,
-    payment_mode: Option<String>,
     notes: Option<String>,
-    hold_name: Option<String>,
     items: Vec<OrderItemInput>,
     created_at: String,
     username: String,
@@ -348,14 +336,14 @@ fn create_order(
     
     let order_id = {
         tx.execute(
-            "INSERT INTO orders (table_id, customer_id, subtotal, tax, discount, service_charge, round_off, total, status, payment_mode, notes, hold_name, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-            params![table_id, customer_id, subtotal, tax, discount, service_charge, round_off, total, status, payment_mode, notes, hold_name, created_at],
+            "INSERT INTO orders (table_id, customer_id, status, notes, created_at)
+             VALUES (?1, ?2, 'Pending', ?3, ?4)",
+            params![table_id, customer_id, notes, created_at],
         ).map_err(|e| e.to_string())?;
         tx.last_insert_rowid()
     };
     
-    log_audit(&tx, &username, "create_order", "orders", Some(order_id), Some(&format!("Created order in status: {}", status)))?;
+    log_audit(&tx, &username, "create_order", "orders", Some(order_id), Some("Created order in status Pending"))?;
     
     let mut inserted_items = Vec::new();
     for item in &items {
@@ -366,61 +354,32 @@ fn create_order(
         ).map_err(|e| e.to_string())?;
         let order_item_id = tx.last_insert_rowid();
         inserted_items.push((order_item_id, item.product_id, item.quantity, item.notes.clone()));
-        
-        if status != "Draft" {
-            tx.execute(
-                "UPDATE inventory SET stock_qty = MAX(0, stock_qty - ?1) WHERE product_id = ?2",
-                params![item.quantity, item.product_id],
-            ).map_err(|e| e.to_string())?;
-        }
     }
     
     if let Some(tid) = table_id {
-        let table_status = if status == "Draft" || status == "Pending" || status == "Billed" {
-            "Occupied"
-        } else {
-            "Free"
-        };
-        let current_order = if status == "Draft" || status == "Pending" || status == "Billed" {
-            Some(order_id)
-        } else {
-            None
-        };
         tx.execute(
-            "UPDATE tables SET status = ?1, current_order_id = ?2 WHERE id = ?3",
-            params![table_status, current_order, tid],
+            "UPDATE tables SET status = 'Occupied' WHERE id = ?1",
+            params![tid],
         ).map_err(|e| e.to_string())?;
     }
     
-    if status == "Completed" {
-        if let Some(cid) = customer_id {
-            let pts_gained = (total / 100.0) as i64;
-            tx.execute(
-                "UPDATE customers SET loyalty_points = loyalty_points + ?1 WHERE id = ?2",
-                params![pts_gained, cid],
-            ).map_err(|e| e.to_string())?;
-        }
-    }
+    tx.execute(
+        "INSERT INTO kot (order_id, status, created_at) VALUES (?1, 'Pending', ?2)",
+        params![order_id, created_at],
+    ).map_err(|e| e.to_string())?;
+    let kot_id = tx.last_insert_rowid();
     
-    if status == "Pending" || status == "Billed" || (status == "Completed" && table_id.is_none()) {
-        tx.execute(
-            "INSERT INTO kot (order_id, status, created_at) VALUES (?1, 'Pending', ?2)",
-            params![order_id, created_at],
-        ).map_err(|e| e.to_string())?;
-        let kot_id = tx.last_insert_rowid();
-        
-        log_audit(&tx, &username, "create_kot", "kot", Some(kot_id), Some(&format!("Created KOT for order: {}", order_id)))?;
+    log_audit(&tx, &username, "create_kot", "kot", Some(kot_id), Some(&format!("Created KOT for order: {}", order_id)))?;
 
-        for (order_item_id, product_id, qty, item_notes) in inserted_items {
-            tx.execute(
-                "INSERT INTO kot_items (kot_id, product_id, quantity, notes) VALUES (?1, ?2, ?3, ?4)",
-                params![kot_id, product_id, qty, item_notes],
-            ).map_err(|e| e.to_string())?;
-            tx.execute(
-                "UPDATE order_items SET kot_id = ?1 WHERE id = ?2",
-                params![kot_id, order_item_id],
-            ).map_err(|e| e.to_string())?;
-        }
+    for (order_item_id, product_id, qty, item_notes) in inserted_items {
+        tx.execute(
+            "INSERT INTO kot_items (kot_id, product_id, quantity, notes) VALUES (?1, ?2, ?3, ?4)",
+            params![kot_id, product_id, qty, item_notes],
+        ).map_err(|e| e.to_string())?;
+        tx.execute(
+            "UPDATE order_items SET kot_id = ?1 WHERE id = ?2",
+            params![kot_id, order_item_id],
+        ).map_err(|e| e.to_string())?;
     }
     
     tx.commit().map_err(|e| e.to_string())?;
@@ -432,16 +391,7 @@ fn update_order(
     order_id: i64,
     table_id: Option<i64>,
     customer_id: Option<i64>,
-    subtotal: f64,
-    tax: f64,
-    discount: f64,
-    service_charge: f64,
-    round_off: f64,
-    total: f64,
-    status: String,
-    payment_mode: Option<String>,
     notes: Option<String>,
-    hold_name: Option<String>,
     items: Vec<OrderItemInput>,
     created_at: String,
     username: String,
@@ -450,14 +400,18 @@ fn update_order(
     let mut conn = rusqlite::Connection::open(&state.path).map_err(|e| e.to_string())?;
     let tx = conn.transaction().map_err(|e| e.to_string())?;
 
-    // 1. Fetch old table_id and old_status for state management later
+    // 1. Fetch old table_id and old_status
     let (old_table_id, old_status): (Option<i64>, String) = tx.query_row(
         "SELECT table_id, status FROM orders WHERE id = ?1",
         [order_id],
         |row| Ok((row.get(0)?, row.get(1)?)),
     ).map_err(|e| e.to_string())?;
 
-    log_audit(&tx, &username, "update_order", "orders", Some(order_id), Some(&format!("Updating order. Old status: {}, New status: {}", old_status, status)))?;
+    if old_status == "Billed" || old_status == "Completed" || old_status == "Cancelled" {
+        return Err("Cannot update order in its current final status".to_string());
+    }
+
+    log_audit(&tx, &username, "update_order", "orders", Some(order_id), Some(&format!("Updating order. Old status: {}", old_status)))?;
 
     // 2. Fetch existing items in this order
     struct DbItem {
@@ -514,29 +468,7 @@ fn update_order(
                     ).map_err(|e| e.to_string())?;
                 }
             } else {
-                // Not sent to KOT (Draft order item)
-                if old_status == "Draft" && status != "Draft" && status != "Cancelled" {
-                    // Transition: Draft -> Active: Deduct full quantity from stock
-                    tx.execute(
-                        "UPDATE inventory SET stock_qty = MAX(0, stock_qty - ?1) WHERE product_id = ?2",
-                        params![item.quantity, item.product_id],
-                    ).map_err(|e| e.to_string())?;
-                } else if old_status != "Draft" && status != "Cancelled" {
-                    // Transition: Active -> Active: Update quantity and handle stock difference
-                    let diff = item.quantity - db_item.quantity;
-                    if diff > 0 {
-                        tx.execute(
-                            "UPDATE inventory SET stock_qty = MAX(0, stock_qty - ?1) WHERE product_id = ?2",
-                            params![diff, item.product_id],
-                        ).map_err(|e| e.to_string())?;
-                    } else if diff < 0 {
-                        let refund = -diff;
-                        tx.execute(
-                            "UPDATE inventory SET stock_qty = stock_qty + ?1 WHERE product_id = ?2",
-                            params![refund, item.product_id],
-                        ).map_err(|e| e.to_string())?;
-                    }
-                }
+                // Not sent to KOT yet
                 tx.execute(
                     "UPDATE order_items SET quantity = ?1, notes = ?2, price = ?3 WHERE id = ?4",
                     params![item.quantity, item.notes, item.price, item_id],
@@ -552,14 +484,6 @@ fn update_order(
             let new_item_id = tx.last_insert_rowid();
             
             log_audit(&tx, &username, "add_item", "order_items", Some(new_item_id), Some(&format!("Added item {} (Qty {}) to order {}", item.name, item.quantity, order_id)))?;
-
-            // If order is already active, deduct stock now
-            if old_status != "Draft" && status != "Cancelled" {
-                tx.execute(
-                    "UPDATE inventory SET stock_qty = MAX(0, stock_qty - ?1) WHERE product_id = ?2",
-                    params![item.quantity, item.product_id],
-                ).map_err(|e| e.to_string())?;
-            }
         }
     }
 
@@ -569,14 +493,6 @@ fn update_order(
             if db_item.kot_id.is_some() {
                 return Err(format!("Cannot delete order item ID {} because it was already sent to the kitchen.", db_item_id));
             }
-            
-            if old_status != "Draft" {
-                tx.execute(
-                    "UPDATE inventory SET stock_qty = stock_qty + ?1 WHERE product_id = ?2",
-                    params![db_item.quantity, db_item.product_id],
-                ).map_err(|e| e.to_string())?;
-            }
-            
             tx.execute("DELETE FROM order_items WHERE id = ?1", [db_item_id]).map_err(|e| e.to_string())?;
             log_audit(&tx, &username, "delete_item", "order_items", Some(db_item_id), Some(&format!("Deleted unsent item from order {}", order_id)))?;
         }
@@ -584,133 +500,194 @@ fn update_order(
 
     // 5. Update orders table row
     tx.execute(
-        "UPDATE orders 
-         SET table_id = ?1, customer_id = ?2, subtotal = ?3, tax = ?4, discount = ?5, service_charge = ?6, round_off = ?7, total = ?8, status = ?9, payment_mode = ?10, notes = ?11, hold_name = ?12
-         WHERE id = ?13",
-        params![table_id, customer_id, subtotal, tax, discount, service_charge, round_off, total, status, payment_mode, notes, hold_name, order_id],
+        "UPDATE orders SET table_id = ?1, customer_id = ?2, notes = ?3 WHERE id = ?4",
+        params![table_id, customer_id, notes, order_id],
     ).map_err(|e| e.to_string())?;
 
     // 6. KOT Generation for Unsent Items
-    if status == "Pending" || status == "Billed" || (status == "Completed" && table_id.is_none()) {
-        struct UnsentItem {
-            id: i64,
-            product_id: i64,
-            quantity: i64,
-            notes: Option<String>,
+    struct UnsentItem {
+        id: i64,
+        product_id: i64,
+        quantity: i64,
+        notes: Option<String>,
+    }
+    
+    let unsent_items = {
+        let mut stmt = tx.prepare(
+            "SELECT id, product_id, quantity, notes FROM order_items WHERE order_id = ?1 AND kot_id IS NULL"
+        ).map_err(|e| e.to_string())?;
+        
+        let unsent_iter = stmt.query_map([order_id], |row| {
+            Ok(UnsentItem {
+                id: row.get(0)?,
+                product_id: row.get(1)?,
+                quantity: row.get(2)?,
+                notes: row.get(3)?,
+            })
+        }).map_err(|e| e.to_string())?;
+        
+        let mut list = Vec::new();
+        for item in unsent_iter {
+            list.push(item.map_err(|e| e.to_string())?);
         }
+        list
+    };
+    
+    if !unsent_items.is_empty() {
+        tx.execute(
+            "INSERT INTO kot (order_id, status, created_at) VALUES (?1, 'Pending', ?2)",
+            params![order_id, created_at],
+        ).map_err(|e| e.to_string())?;
+        let kot_id = tx.last_insert_rowid();
         
-        let unsent_items = {
-            let mut stmt = tx.prepare(
-                "SELECT id, product_id, quantity, notes FROM order_items WHERE order_id = ?1 AND kot_id IS NULL"
-            ).map_err(|e| e.to_string())?;
-            
-            let unsent_iter = stmt.query_map([order_id], |row| {
-                Ok(UnsentItem {
-                    id: row.get(0)?,
-                    product_id: row.get(1)?,
-                    quantity: row.get(2)?,
-                    notes: row.get(3)?,
-                })
-            }).map_err(|e| e.to_string())?;
-            
-            let mut list = Vec::new();
-            for item in unsent_iter {
-                list.push(item.map_err(|e| e.to_string())?);
-            }
-            list
-        };
-        
-        if !unsent_items.is_empty() {
-            tx.execute(
-                "INSERT INTO kot (order_id, status, created_at) VALUES (?1, 'Pending', ?2)",
-                params![order_id, created_at],
-            ).map_err(|e| e.to_string())?;
-            let kot_id = tx.last_insert_rowid();
-            
-            log_audit(&tx, &username, "create_kot", "kot", Some(kot_id), Some(&format!("Created KOT for order: {}", order_id)))?;
+        log_audit(&tx, &username, "create_kot", "kot", Some(kot_id), Some(&format!("Created KOT for order: {}", order_id)))?;
 
-            for item in unsent_items {
-                tx.execute(
-                    "INSERT INTO kot_items (kot_id, product_id, quantity, notes) VALUES (?1, ?2, ?3, ?4)",
-                    params![kot_id, item.product_id, item.quantity, item.notes],
-                ).map_err(|e| e.to_string())?;
-                tx.execute(
-                    "UPDATE order_items SET kot_id = ?1 WHERE id = ?2",
-                    params![kot_id, item.id],
-                ).map_err(|e| e.to_string())?;
-            }
+        for item in unsent_items {
+            tx.execute(
+                "INSERT INTO kot_items (kot_id, product_id, quantity, notes) VALUES (?1, ?2, ?3, ?4)",
+                params![kot_id, item.product_id, item.quantity, item.notes],
+            ).map_err(|e| e.to_string())?;
+            tx.execute(
+                "UPDATE order_items SET kot_id = ?1 WHERE id = ?2",
+                params![kot_id, item.id],
+            ).map_err(|e| e.to_string())?;
         }
     }
 
     // 7. Table Status Management
     if let Some(old_tid) = old_table_id {
-        if table_id != Some(old_tid) || status == "Completed" || status == "Cancelled" {
+        if table_id != Some(old_tid) {
             tx.execute(
-                "UPDATE tables SET status = 'Free', current_order_id = NULL WHERE id = ?1",
+                "UPDATE tables SET status = 'Free', merged_into = NULL WHERE id = ?1 OR merged_into = ?1",
                 [old_tid],
             ).map_err(|e| e.to_string())?;
         }
     }
     
     if let Some(tid) = table_id {
-        if status == "Draft" || status == "Pending" || status == "Billed" {
-            tx.execute(
-                "UPDATE tables SET status = 'Occupied', current_order_id = ?1 WHERE id = ?2",
-                params![order_id, tid],
-            ).map_err(|e| e.to_string())?;
-        }
-    }
-
-    // 8. Loyalty points award
-    if status == "Completed" {
-        if let Some(cid) = customer_id {
-            let pts_gained = (total / 100.0) as i64;
-            tx.execute(
-                "UPDATE customers SET loyalty_points = loyalty_points + ?1 WHERE id = ?2",
-                params![pts_gained, cid],
-            ).map_err(|e| e.to_string())?;
-        }
+        tx.execute(
+            "UPDATE tables SET status = 'Occupied' WHERE id = ?1",
+            [tid],
+        ).map_err(|e| e.to_string())?;
     }
 
     tx.commit().map_err(|e| e.to_string())?;
     Ok(())
 }
 
+const ORDERS_SELECT_SQL: &str = 
+    "SELECT o.id, o.table_id, t.name, o.customer_id, c.name, 
+            COALESCE(b.subtotal, 0.0), 
+            COALESCE(b.tax, 0.0), 
+            COALESCE(b.discount, 0.0), 
+            COALESCE(b.service_charge, 0.0), 
+            COALESCE(b.round_off, 0.0), 
+            COALESCE(b.total, 0.0), 
+            o.status, 
+            (SELECT GROUP_CONCAT(payment_method, ', ') FROM payments WHERE bill_id = b.id), 
+            o.notes, o.created_at, o.cancelled_by, o.cancelled_at, o.cancel_reason
+     FROM orders o 
+     LEFT JOIN tables t ON o.table_id = t.id 
+     LEFT JOIN customers c ON o.customer_id = c.id
+     LEFT JOIN bills b ON o.id = b.order_id";
+
+fn fetch_orders_by_query(
+    conn: &rusqlite::Connection,
+    sql_query: &str,
+    params: &[&dyn rusqlite::ToSql],
+) -> Result<Vec<OrderHeader>, String> {
+    let mut stmt = conn.prepare(sql_query).map_err(|e| e.to_string())?;
+    
+    let order_iter = stmt.query_map(params, |row| {
+        Ok(OrderHeader {
+            id: row.get(0)?,
+            table_id: row.get(1)?,
+            table_name: row.get(2)?,
+            customer_id: row.get(3)?,
+            customer_name: row.get(4)?,
+            subtotal: row.get(5)?,
+            tax: row.get(6)?,
+            discount: row.get(7)?,
+            service_charge: row.get(8)?,
+            round_off: row.get(9)?,
+            total: row.get(10)?,
+            status: row.get(11)?,
+            payment_mode: row.get(12)?,
+            notes: row.get(13)?,
+            created_at: row.get(14)?,
+            cancelled_by: row.get(15)?,
+            cancelled_at: row.get(16)?,
+            cancel_reason: row.get(17)?,
+        })
+    }).map_err(|e| e.to_string())?;
+    
+    let mut orders = Vec::new();
+    for ord in order_iter {
+        let mut header = ord.map_err(|e| e.to_string())?;
+        
+        // If the order is pending, dynamically compute its current items' totals
+        if header.status == "Pending" {
+            let mut item_stmt = conn.prepare(
+                "SELECT quantity, 
+                        COALESCE((SELECT SUM(c.quantity) FROM order_item_cancellations c WHERE c.order_item_id = oi.id), 0) AS cancelled_qty,
+                        price, gst_rate
+                 FROM order_items oi
+                 WHERE order_id = ?1"
+            ).map_err(|e| e.to_string())?;
+            
+            struct ItemCalc {
+                qty: i64,
+                cancelled: i64,
+                price: f64,
+                gst: f64,
+            }
+            
+            let item_iter = item_stmt.query_map([header.id], |row| {
+                Ok(ItemCalc {
+                    qty: row.get(0)?,
+                    cancelled: row.get(1)?,
+                    price: row.get(2)?,
+                    gst: row.get(3)?,
+                })
+            }).map_err(|e| e.to_string())?;
+            
+            let mut subtotal = 0.0;
+            let mut total_tax = 0.0;
+            for it in item_iter {
+                let item = it.map_err(|e| e.to_string())?;
+                let effective_qty = item.qty - item.cancelled;
+                if effective_qty > 0 {
+                    let item_subtotal = item.price * (effective_qty as f64);
+                    let item_tax = item_subtotal * (item.gst / 100.0);
+                    subtotal += item_subtotal;
+                    total_tax += item_tax;
+                }
+            }
+            let total_raw = subtotal + total_tax;
+            let total_rounded = total_raw.round();
+            let round_off = total_rounded - total_raw;
+            
+            header.subtotal = subtotal;
+            header.tax = total_tax;
+            header.round_off = round_off;
+            header.total = total_rounded;
+        }
+        
+        orders.push(header);
+    }
+    
+    Ok(orders)
+}
+
 #[tauri::command]
 fn get_order(order_id: i64, state: tauri::State<'_, db::DbPathState>) -> Result<OrderOutput, String> {
     let conn = rusqlite::Connection::open(&state.path).map_err(|e| e.to_string())?;
     
-    let header = conn.query_row(
-        "SELECT o.id, o.table_id, t.name, o.customer_id, c.name, o.subtotal, o.tax, o.discount, o.service_charge, o.round_off, o.total, o.status, o.payment_mode, o.notes, o.hold_name, o.created_at, o.cancelled_by, o.cancelled_at, o.cancel_reason
-         FROM orders o 
-         LEFT JOIN tables t ON o.table_id = t.id 
-         LEFT JOIN customers c ON o.customer_id = c.id
-         WHERE o.id = ?1",
-        [order_id],
-        |row| {
-            Ok(OrderHeader {
-                id: row.get(0)?,
-                table_id: row.get(1)?,
-                table_name: row.get(2)?,
-                customer_id: row.get(3)?,
-                customer_name: row.get(4)?,
-                subtotal: row.get(5)?,
-                tax: row.get(6)?,
-                discount: row.get(7)?,
-                service_charge: row.get(8)?,
-                round_off: row.get(9)?,
-                total: row.get(10)?,
-                status: row.get(11)?,
-                payment_mode: row.get(12)?,
-                notes: row.get(13)?,
-                hold_name: row.get(14)?,
-                created_at: row.get(15)?,
-                cancelled_by: row.get(16)?,
-                cancelled_at: row.get(17)?,
-                cancel_reason: row.get(18)?,
-            })
-        },
-    ).map_err(|e| e.to_string())?;
+    let mut orders = fetch_orders_by_query(&conn, &format!("{} WHERE o.id = ?1", ORDERS_SELECT_SQL), &[&order_id])?;
+    if orders.is_empty() {
+        return Err("Order not found".to_string());
+    }
+    let header = orders.remove(0);
     
     let mut stmt = conn.prepare(
         "SELECT oi.id, oi.product_id, oi.name, oi.quantity, 
@@ -745,90 +722,31 @@ fn get_order(order_id: i64, state: tauri::State<'_, db::DbPathState>) -> Result<
 #[tauri::command]
 fn get_active_orders(state: tauri::State<'_, db::DbPathState>) -> Result<Vec<OrderHeader>, String> {
     let conn = rusqlite::Connection::open(&state.path).map_err(|e| e.to_string())?;
-    let mut stmt = conn.prepare(
-        "SELECT o.id, o.table_id, t.name, o.customer_id, c.name, o.subtotal, o.tax, o.discount, o.service_charge, o.round_off, o.total, o.status, o.payment_mode, o.notes, o.hold_name, o.created_at, o.cancelled_by, o.cancelled_at, o.cancel_reason
-         FROM orders o 
-         LEFT JOIN tables t ON o.table_id = t.id 
-         LEFT JOIN customers c ON o.customer_id = c.id
-         WHERE o.status IN ('Draft', 'Pending', 'Billed')
-         ORDER BY o.id DESC"
-    ).map_err(|e| e.to_string())?;
-    
-    let order_iter = stmt.query_map([], |row| {
-        Ok(OrderHeader {
-            id: row.get(0)?,
-            table_id: row.get(1)?,
-            table_name: row.get(2)?,
-            customer_id: row.get(3)?,
-            customer_name: row.get(4)?,
-            subtotal: row.get(5)?,
-            tax: row.get(6)?,
-            discount: row.get(7)?,
-            service_charge: row.get(8)?,
-            round_off: row.get(9)?,
-            total: row.get(10)?,
-            status: row.get(11)?,
-            payment_mode: row.get(12)?,
-            notes: row.get(13)?,
-            hold_name: row.get(14)?,
-            created_at: row.get(15)?,
-            cancelled_by: row.get(16)?,
-            cancelled_at: row.get(17)?,
-            cancel_reason: row.get(18)?,
-        })
-    }).map_err(|e| e.to_string())?;
-    
-    let mut orders = Vec::new();
-    for ord in order_iter {
-        orders.push(ord.map_err(|e| e.to_string())?);
-    }
-    Ok(orders)
+    fetch_orders_by_query(
+        &conn, 
+        &format!("{} WHERE o.status IN ('Pending', 'Billed') ORDER BY o.id DESC", ORDERS_SELECT_SQL),
+        &[]
+    )
 }
 
 #[tauri::command]
-fn complete_payment(
-    order_id: i64,
-    payment_mode: String,
-    username: String,
-    state: tauri::State<'_, db::DbPathState>,
-) -> Result<(), String> {
-    let mut conn = rusqlite::Connection::open(&state.path).map_err(|e| e.to_string())?;
-    let tx = conn.transaction().map_err(|e| e.to_string())?;
-    
-    // Retrieve table id & customer info
-    let (table_id, customer_id, total): (Option<i64>, Option<i64>, f64) = tx.query_row(
-        "SELECT table_id, customer_id, total FROM orders WHERE id = ?1",
-        [order_id],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-    ).map_err(|e| e.to_string())?;
-    
-    // Complete order
-    tx.execute(
-        "UPDATE orders SET status = 'Completed', payment_mode = ?1 WHERE id = ?2",
-        params![payment_mode, order_id],
-    ).map_err(|e| e.to_string())?;
-    
-    // Free table
-    if let Some(tid) = table_id {
-        tx.execute(
-            "UPDATE tables SET status = 'Free', current_order_id = NULL WHERE id = ?1",
-            [tid],
-        ).map_err(|e| e.to_string())?;
-    }
-    
-    // Award loyalty points (1 point per ₹100 spent)
-    if let Some(cid) = customer_id {
-        let points = (total / 100.0) as i64;
-        tx.execute(
-            "UPDATE customers SET loyalty_points = loyalty_points + ?1 WHERE id = ?2",
-            params![points, cid],
-        ).map_err(|e| e.to_string())?;
-    }
-    
-    log_audit(&tx, &username, "complete_payment", "orders", Some(order_id), Some(&format!("Completed payment using mode: {}", payment_mode)))?;
-    
-    tx.commit().map_err(|e| e.to_string())?;
-    Ok(())
+fn get_completed_orders(state: tauri::State<'_, db::DbPathState>) -> Result<Vec<OrderHeader>, String> {
+    let conn = rusqlite::Connection::open(&state.path).map_err(|e| e.to_string())?;
+    fetch_orders_by_query(
+        &conn,
+        &format!("{} WHERE o.status = 'Completed' ORDER BY o.id DESC", ORDERS_SELECT_SQL),
+        &[]
+    )
+}
+
+#[tauri::command]
+fn get_customer_orders(customer_id: i64, state: tauri::State<'_, db::DbPathState>) -> Result<Vec<OrderHeader>, String> {
+    let conn = rusqlite::Connection::open(&state.path).map_err(|e| e.to_string())?;
+    fetch_orders_by_query(
+        &conn,
+        &format!("{} WHERE o.customer_id = ?1 ORDER BY o.id DESC", ORDERS_SELECT_SQL),
+        &[&customer_id]
+    )
 }
 
 #[tauri::command]
@@ -852,9 +770,8 @@ fn cancel_order(
         return Err("Order is already cancelled".to_string());
     }
     
-    // Refund stock count ONLY if status is NOT 'Draft'
     let mut kot_cancellations = Vec::new();
-    if current_status != "Draft" {
+    {
         struct ItemDetails {
             product_id: i64,
             quantity: i64,
@@ -873,6 +790,7 @@ fn cancel_order(
         
         let items_iter = stmt.query_map([order_id], |row| {
             Ok(ItemDetails {
+                // index matches: product_id (0), name (1), quantity (2), cancelled_qty (3), notes (4), kot_id (5)
                 product_id: row.get(0)?,
                 quantity: row.get(2)?,
                 cancelled_qty: row.get(3)?,
@@ -884,15 +802,8 @@ fn cancel_order(
         for item_res in items_iter {
             let item = item_res.map_err(|e| e.to_string())?;
             let effective_qty = item.quantity - item.cancelled_qty;
-            if effective_qty > 0 {
-                tx.execute(
-                    "UPDATE inventory SET stock_qty = stock_qty + ?1 WHERE product_id = ?2",
-                    params![effective_qty, item.product_id],
-                ).map_err(|e| e.to_string())?;
-                
-                if item.kot_id.is_some() {
-                    kot_cancellations.push((item.product_id, effective_qty, item.notes));
-                }
+            if effective_qty > 0 && item.kot_id.is_some() {
+                kot_cancellations.push((item.product_id, effective_qty, item.notes));
             }
         }
     }
@@ -904,10 +815,16 @@ fn cancel_order(
         params![cancelled_by, now, reason, order_id],
     ).map_err(|e| e.to_string())?;
     
-    // Free table
+    // Set bill status to Cancelled if a bill exists
+    tx.execute(
+        "UPDATE bills SET status = 'Cancelled' WHERE order_id = ?1",
+        [order_id],
+    ).map_err(|e| e.to_string())?;
+    
+    // Free table and reset merged_into
     if let Some(tid) = table_id {
         tx.execute(
-            "UPDATE tables SET status = 'Free', current_order_id = NULL WHERE id = ?1",
+            "UPDATE tables SET status = 'Free', merged_into = NULL WHERE id = ?1 OR merged_into = ?1",
             [tid],
         ).map_err(|e| e.to_string())?;
     }
@@ -994,11 +911,6 @@ fn cancel_order_item(
     ).map_err(|e| e.to_string())?;
     
     tx.execute(
-        "UPDATE inventory SET stock_qty = stock_qty + ?1 WHERE product_id = ?2",
-        params![quantity_to_cancel, item.product_id],
-    ).map_err(|e| e.to_string())?;
-    
-    tx.execute(
         "INSERT INTO kot (order_id, status, created_at) VALUES (?1, 'Pending', ?2)",
         params![item.order_id, now],
     ).map_err(|e| e.to_string())?;
@@ -1015,19 +927,40 @@ fn cancel_order_item(
     
     log_audit(&tx, &cancelled_by, "cancel_item", "order_items", Some(order_item_id), Some(&format!("Cancelled {} x {}. Reason: {}", quantity_to_cancel, item.name, reason)))?;
     
-    recalculate_order_totals(&tx, item.order_id)?;
+    // If a bill exists, update its totals
+    let bill_exists: bool = tx.query_row(
+        "SELECT COUNT(*) FROM bills WHERE order_id = ?1",
+        [item.order_id],
+        |row| row.get::<_, i64>(0),
+    ).unwrap_or(0) > 0;
+    
+    if bill_exists {
+        let (discount, service_charge): (f64, f64) = tx.query_row(
+            "SELECT discount, service_charge FROM bills WHERE order_id = ?1",
+            [item.order_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).map_err(|e| e.to_string())?;
+        
+        let (subtotal, final_tax, round_off, total_rounded) = calculate_totals_for_order(&tx, item.order_id, discount, service_charge)?;
+        
+        tx.execute(
+            "UPDATE bills 
+             SET subtotal = ?1, tax = ?2, round_off = ?3, total = ?4 
+             WHERE order_id = ?5",
+            params![subtotal, final_tax, round_off, total_rounded, item.order_id],
+        ).map_err(|e| e.to_string())?;
+    }
     
     tx.commit().map_err(|e| e.to_string())?;
     Ok(())
 }
 
-fn recalculate_order_totals(conn: &rusqlite::Connection, order_id: i64) -> Result<(), String> {
-    let (discount, service_charge): (f64, f64) = conn.query_row(
-        "SELECT discount, service_charge FROM orders WHERE id = ?1",
-        [order_id],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    ).map_err(|e| e.to_string())?;
-    
+fn calculate_totals_for_order(
+    conn: &rusqlite::Connection,
+    order_id: i64,
+    discount: f64,
+    service_charge: f64,
+) -> Result<(f64, f64, f64, f64), String> {
     struct ItemTotals {
         quantity: i64,
         cancelled_qty: i64,
@@ -1080,13 +1013,190 @@ fn recalculate_order_totals(conn: &rusqlite::Connection, order_id: i64) -> Resul
     let total_rounded = total_raw.round();
     let round_off = total_rounded - total_raw;
     
-    conn.execute(
-        "UPDATE orders 
-         SET subtotal = ?1, tax = ?2, round_off = ?3, total = ?4 
-         WHERE id = ?5",
-        params![subtotal, final_tax, round_off, total_rounded, order_id],
+    Ok((subtotal, final_tax, round_off, total_rounded))
+}
+
+#[tauri::command]
+fn generate_bill(
+    order_id: i64,
+    discount: f64,
+    service_charge: f64,
+    username: String,
+    state: tauri::State<'_, db::DbPathState>,
+) -> Result<OrderHeader, String> {
+    let mut conn = rusqlite::Connection::open(&state.path).map_err(|e| e.to_string())?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    
+    // Check if bill already exists
+    let existing_bill_id: Option<i64> = tx.query_row(
+        "SELECT id FROM bills WHERE order_id = ?1",
+        [order_id],
+        |row| row.get(0),
+    ).optional().map_err(|e| e.to_string())?;
+    
+    if existing_bill_id.is_none() {
+        // Calculate totals
+        let (subtotal, final_tax, round_off, total_rounded) = calculate_totals_for_order(&tx, order_id, discount, service_charge)?;
+        
+        let now = get_db_timestamp(&tx);
+        
+        // Insert bill record
+        tx.execute(
+            "INSERT INTO bills (order_id, bill_number, subtotal, discount, tax, service_charge, round_off, total, status, created_at, billed_at)
+             VALUES (?1, '', ?2, ?3, ?4, ?5, ?6, ?7, 'Unpaid', ?8, ?9)",
+            params![order_id, subtotal, discount, final_tax, service_charge, round_off, total_rounded, now, now],
+        ).map_err(|e| e.to_string())?;
+        
+        let new_bill_id = tx.last_insert_rowid();
+        let bill_number = format!("BILL-{:05}", new_bill_id);
+        
+        tx.execute(
+            "UPDATE bills SET bill_number = ?1 WHERE id = ?2",
+            params![bill_number, new_bill_id],
+        ).map_err(|e| e.to_string())?;
+        
+        // Update order status to 'Billed'
+        tx.execute(
+            "UPDATE orders SET status = 'Billed' WHERE id = ?1",
+            [order_id],
+        ).map_err(|e| e.to_string())?;
+        
+        // Update table status to 'Billed' if order has table_id
+        let table_id: Option<i64> = tx.query_row(
+            "SELECT table_id FROM orders WHERE id = ?1",
+            [order_id],
+            |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        
+        if let Some(tid) = table_id {
+            tx.execute(
+                "UPDATE tables SET status = 'Billed' WHERE id = ?1",
+                [tid],
+            ).map_err(|e| e.to_string())?;
+        }
+        
+        log_audit(&tx, &username, "generate_bill", "bills", Some(new_bill_id), Some(&format!("Generated bill {} for order {}", bill_number, order_id)))?;
+    }
+    
+    tx.commit().map_err(|e| e.to_string())?;
+    
+    // Retrieve and return the updated order header
+    let conn_read = rusqlite::Connection::open(&state.path).map_err(|e| e.to_string())?;
+    let mut orders = fetch_orders_by_query(&conn_read, &format!("{} WHERE o.id = ?1", ORDERS_SELECT_SQL), &[&order_id])?;
+    if orders.is_empty() {
+        return Err("Order not found".to_string());
+    }
+    Ok(orders.remove(0))
+}
+
+#[tauri::command]
+fn record_payments(
+    order_id: i64,
+    payments: Vec<PaymentInput>,
+    username: String,
+    state: tauri::State<'_, db::DbPathState>,
+) -> Result<(), String> {
+    let mut conn = rusqlite::Connection::open(&state.path).map_err(|e| e.to_string())?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    
+    // Fetch bill id and total using order_id
+    let (bill_id, bill_total): (i64, f64) = tx.query_row(
+        "SELECT id, total FROM bills WHERE order_id = ?1",
+        [order_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).map_err(|e| format!("No bill found for order {}: {}", order_id, e))?;
+    
+    // Calculate total payments amount
+    let mut total_paid = 0.0;
+    let mut cash_payment_index: Option<usize> = None;
+    
+    for (i, payment) in payments.iter().enumerate() {
+        if payment.payment_method == "Cash" {
+            cash_payment_index = Some(i);
+        }
+        total_paid += payment.amount;
+    }
+    
+    if total_paid < bill_total {
+        return Err(format!("Insufficient payment: received ₹{:.2}, bill total is ₹{:.2}", total_paid, bill_total));
+    }
+    
+    let now = get_db_timestamp(&tx);
+    
+    // Check if cash change handles overpayment
+    if total_paid > bill_total {
+        if let Some(cash_idx) = cash_payment_index {
+            let change = total_paid - bill_total;
+            
+            for (i, payment) in payments.iter().enumerate() {
+                let mut amt = payment.amount;
+                if i == cash_idx {
+                    amt -= change;
+                }
+                
+                if amt > 0.0 {
+                    tx.execute(
+                        "INSERT INTO payments (bill_id, payment_method, amount, created_at)
+                         VALUES (?1, ?2, ?3, ?4)",
+                        params![bill_id, payment.payment_method, amt, now],
+                    ).map_err(|e| e.to_string())?;
+                }
+            }
+        } else {
+            return Err("Overpayment is only supported for Cash payments (change return)".to_string());
+        }
+    } else {
+        // Exact payment
+        for payment in &payments {
+            if payment.amount > 0.0 {
+                tx.execute(
+                    "INSERT INTO payments (bill_id, payment_method, amount, created_at)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![bill_id, payment.payment_method, payment.amount, now],
+                ).map_err(|e| e.to_string())?;
+            }
+        }
+    }
+    
+    // Update bill status to 'Paid'
+    tx.execute(
+        "UPDATE bills SET status = 'Paid' WHERE id = ?1",
+        [bill_id],
     ).map_err(|e| e.to_string())?;
     
+    // Update order status to 'Completed'
+    tx.execute(
+        "UPDATE orders SET status = 'Completed' WHERE id = ?1",
+        [order_id],
+    ).map_err(|e| e.to_string())?;
+    
+    // Fetch table_id and customer_id
+    let (table_id, customer_id): (Option<i64>, Option<i64>) = tx.query_row(
+        "SELECT table_id, customer_id FROM orders WHERE id = ?1",
+        [order_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).map_err(|e| e.to_string())?;
+    
+    // Free table and reset merged_into
+    if let Some(tid) = table_id {
+        tx.execute(
+            "UPDATE tables SET status = 'Free', merged_into = NULL WHERE id = ?1 OR merged_into = ?1",
+            [tid],
+        ).map_err(|e| e.to_string())?;
+    }
+    
+    // Award loyalty points
+    if let Some(cid) = customer_id {
+        let pts_gained = (bill_total / 100.0) as i64;
+        tx.execute(
+            "UPDATE customers SET loyalty_points = loyalty_points + ?1 WHERE id = ?2",
+            params![pts_gained, cid],
+        ).map_err(|e| e.to_string())?;
+    }
+    
+    log_audit(&tx, &username, "record_payments", "bills", Some(bill_id), Some(&format!("Recorded payment of ₹{:.2} for bill ID {}", bill_total, bill_id)))?;
+    
+    tx.commit().map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -1095,9 +1205,16 @@ fn recalculate_order_totals(conn: &rusqlite::Connection, order_id: i64) -> Resul
 fn get_tables(state: tauri::State<'_, db::DbPathState>) -> Result<Vec<TableDetails>, String> {
     let conn = rusqlite::Connection::open(&state.path).map_err(|e| e.to_string())?;
     let mut stmt = conn.prepare(
-        "SELECT t.id, t.name, t.status, t.merged_into, t.current_order_id, o.total, o.hold_name
+        "SELECT t.id, t.name, t.status, t.merged_into,
+                o.id AS current_order_id,
+                COALESCE(
+                    b.total,
+                    (SELECT COALESCE(SUM(oi.price * (oi.quantity - COALESCE((SELECT SUM(c.quantity) FROM order_item_cancellations c WHERE c.order_item_id = oi.id), 0))), 0.0)
+                     FROM order_items oi WHERE oi.order_id = o.id)
+                ) as current_order_total
          FROM tables t
-         LEFT JOIN orders o ON t.current_order_id = o.id
+         LEFT JOIN orders o ON t.id = o.table_id AND o.status IN ('Pending', 'Billed')
+         LEFT JOIN bills b ON o.id = b.order_id
          ORDER BY t.id ASC"
     ).map_err(|e| e.to_string())?;
     
@@ -1109,7 +1226,6 @@ fn get_tables(state: tauri::State<'_, db::DbPathState>) -> Result<Vec<TableDetai
             merged_into: row.get(3)?,
             current_order_id: row.get(4)?,
             current_order_total: row.get(5)?,
-            current_order_hold_name: row.get(6)?,
         })
     }).map_err(|e| e.to_string())?;
     
@@ -1132,10 +1248,10 @@ fn transfer_table(
     
     // Get active order id
     let order_id: Option<i64> = tx.query_row(
-        "SELECT current_order_id FROM tables WHERE id = ?1",
+        "SELECT id FROM orders WHERE table_id = ?1 AND status IN ('Pending', 'Billed')",
         [from_table_id],
         |row| row.get(0),
-    ).map_err(|e| e.to_string())?;
+    ).optional().map_err(|e| e.to_string())?;
     
     let oid = order_id.ok_or_else(|| "No active order on source table".to_string())?;
     
@@ -1156,16 +1272,23 @@ fn transfer_table(
         params![to_table_id, oid],
     ).map_err(|e| e.to_string())?;
     
+    // Fetch source status to apply to target table
+    let source_status: String = tx.query_row(
+        "SELECT status FROM tables WHERE id = ?1",
+        [from_table_id],
+        |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    
     // Reset source table
     tx.execute(
-        "UPDATE tables SET status = 'Free', current_order_id = NULL WHERE id = ?1",
+        "UPDATE tables SET status = 'Free', merged_into = NULL WHERE id = ?1 OR merged_into = ?1",
         [from_table_id],
     ).map_err(|e| e.to_string())?;
     
-    // Set target table
+    // Set target table status
     tx.execute(
-        "UPDATE tables SET status = 'Occupied', current_order_id = ?1 WHERE id = ?2",
-        params![oid, to_table_id],
+        "UPDATE tables SET status = ?1 WHERE id = ?2",
+        params![source_status, to_table_id],
     ).map_err(|e| e.to_string())?;
     
     log_audit(&tx, &username, "transfer_table", "tables", Some(from_table_id), Some(&format!("Transferred order {} from table ID {} to ID {}", oid, from_table_id, to_table_id)))?;
@@ -1183,7 +1306,7 @@ fn merge_tables(
 ) -> Result<(), String> {
     let conn = rusqlite::Connection::open(&state.path).map_err(|e| e.to_string())?;
     conn.execute(
-        "UPDATE tables SET merged_into = ?1, status = 'Free', current_order_id = NULL WHERE id = ?2",
+        "UPDATE tables SET merged_into = ?1, status = 'Free' WHERE id = ?2",
         params![target_table_id, source_table_id],
     ).map_err(|e| e.to_string())?;
     
@@ -1445,77 +1568,6 @@ fn increment_kot_print_count(
     Ok(new_count)
 }
 
-// Inventory Management
-#[tauri::command]
-fn get_inventory(state: tauri::State<'_, db::DbPathState>) -> Result<Vec<InventoryOutput>, String> {
-    let conn = rusqlite::Connection::open(&state.path).map_err(|e| e.to_string())?;
-    let mut stmt = conn.prepare(
-        "SELECT i.product_id, p.name, c.name, p.price, i.stock_qty, i.low_stock_threshold
-         FROM inventory i
-         JOIN products p ON i.product_id = p.id
-         JOIN categories c ON p.category_id = c.id
-         ORDER BY p.name ASC"
-    ).map_err(|e| e.to_string())?;
-    
-    let inv_iter = stmt.query_map([], |row| {
-        Ok(InventoryOutput {
-            product_id: row.get(0)?,
-            product_name: row.get(1)?,
-            category_name: row.get(2)?,
-            price: row.get(3)?,
-            stock_qty: row.get(4)?,
-            low_stock_threshold: row.get(5)?,
-        })
-    }).map_err(|e| e.to_string())?;
-    
-    let mut inventory = Vec::new();
-    for inv in inv_iter {
-        inventory.push(inv.map_err(|e| e.to_string())?);
-    }
-    Ok(inventory)
-}
-
-#[tauri::command]
-fn update_stock(
-    product_id: i64,
-    change_qty: i64,
-    state: tauri::State<'_, db::DbPathState>,
-) -> Result<(), String> {
-    let conn = rusqlite::Connection::open(&state.path).map_err(|e| e.to_string())?;
-    conn.execute(
-        "UPDATE inventory SET stock_qty = MAX(0, stock_qty + ?1) WHERE product_id = ?2",
-        params![change_qty, product_id],
-    ).map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-#[tauri::command]
-fn add_purchase(
-    product_id: i64,
-    quantity: i64,
-    supplier: Option<String>,
-    unit_price: f64,
-    date: String,
-    state: tauri::State<'_, db::DbPathState>,
-) -> Result<(), String> {
-    let mut conn = rusqlite::Connection::open(&state.path).map_err(|e| e.to_string())?;
-    let tx = conn.transaction().map_err(|e| e.to_string())?;
-    
-    tx.execute(
-        "INSERT INTO purchase_history (product_id, quantity, supplier, unit_price, date) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![product_id, quantity, supplier, unit_price, date],
-    ).map_err(|e| e.to_string())?;
-    
-    tx.execute(
-        "UPDATE inventory SET stock_qty = stock_qty + ?1 WHERE product_id = ?2",
-        params![quantity, product_id],
-    ).map_err(|e| e.to_string())?;
-    
-    tx.commit().map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-// Menu CRUD Editor
 #[tauri::command]
 fn upsert_category(
     id: Option<i64>,
@@ -1524,6 +1576,7 @@ fn upsert_category(
     state: tauri::State<'_, db::DbPathState>,
 ) -> Result<(), String> {
     let conn = rusqlite::Connection::open(&state.path).map_err(|e| e.to_string())?;
+    
     if let Some(cat_id) = id {
         conn.execute(
             "UPDATE categories SET name = ?1, description = ?2 WHERE id = ?3",
@@ -1557,23 +1610,10 @@ fn upsert_product(
             params![category_id, name, price, gst_rate, avail_val, prod_id],
         ).map_err(|e| e.to_string())?;
     } else {
-        let mut conn_mut = conn;
-        let tx = conn_mut.transaction().map_err(|e| e.to_string())?;
-        
-        tx.execute(
+        conn.execute(
             "INSERT INTO products (category_id, name, price, gst_rate, is_available) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![category_id, name, price, gst_rate, avail_val],
         ).map_err(|e| e.to_string())?;
-        
-        let new_prod_id = tx.last_insert_rowid();
-        
-        // Add to inventory table
-        tx.execute(
-            "INSERT INTO inventory (product_id, stock_qty, low_stock_threshold) VALUES (?1, 0, 5)",
-            [new_prod_id],
-        ).map_err(|e| e.to_string())?;
-        
-        tx.commit().map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -1582,18 +1622,22 @@ fn upsert_product(
 #[tauri::command]
 fn get_customers(state: tauri::State<'_, db::DbPathState>) -> Result<Vec<CustomerDetails>, String> {
     let conn = rusqlite::Connection::open(&state.path).map_err(|e| e.to_string())?;
-    let mut stmt = conn.prepare("SELECT id, name, phone, email, loyalty_points FROM customers ORDER BY name ASC").map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare("SELECT id, name, phone, email, loyalty_points FROM customers ORDER BY name ASC")
+        .map_err(|e| e.to_string())?;
     
-    let cust_iter = stmt.query_map([], |row| {
-        Ok(CustomerDetails {
-            id: row.get(0)?,
-            name: row.get(1)?,
-            phone: row.get(2)?,
-            email: row.get(3)?,
-            loyalty_points: row.get(4)?,
+    let cust_iter = stmt
+        .query_map([], |row| {
+            Ok(CustomerDetails {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                phone: row.get(2)?,
+                email: row.get(3)?,
+                loyalty_points: row.get(4)?,
+            })
         })
-    }).map_err(|e| e.to_string())?;
-    
+        .map_err(|e| e.to_string())?;
+        
     let mut customers = Vec::new();
     for cust in cust_iter {
         customers.push(cust.map_err(|e| e.to_string())?);
@@ -1609,22 +1653,31 @@ fn upsert_customer(
     email: Option<String>,
     loyalty_points: Option<i64>,
     state: tauri::State<'_, db::DbPathState>,
-) -> Result<i64, String> {
+) -> Result<(), String> {
     let conn = rusqlite::Connection::open(&state.path).map_err(|e| e.to_string())?;
+
     if let Some(cust_id) = id {
+        if let Some(pts) = loyalty_points {
+            // Full update including loyalty points when explicitly provided
+            conn.execute(
+                "UPDATE customers SET name = ?1, phone = ?2, email = ?3, loyalty_points = ?4 WHERE id = ?5",
+                params![name, phone, email, pts, cust_id],
+            ).map_err(|e| e.to_string())?;
+        } else {
+            // Update without touching loyalty points
+            conn.execute(
+                "UPDATE customers SET name = ?1, phone = ?2, email = ?3 WHERE id = ?4",
+                params![name, phone, email, cust_id],
+            ).map_err(|e| e.to_string())?;
+        }
+    } else {
         let pts = loyalty_points.unwrap_or(0);
         conn.execute(
-            "UPDATE customers SET name = ?1, phone = ?2, email = ?3, loyalty_points = ?4 WHERE id = ?5",
-            params![name, phone, email, pts, cust_id],
+            "INSERT INTO customers (name, phone, email, loyalty_points) VALUES (?1, ?2, ?3, ?4)",
+            params![name, phone, email, pts],
         ).map_err(|e| e.to_string())?;
-        Ok(cust_id)
-    } else {
-        conn.execute(
-            "INSERT INTO customers (name, phone, email, loyalty_points) VALUES (?1, ?2, ?3, 0)",
-            params![name, phone, email],
-        ).map_err(|e| e.to_string())?;
-        Ok(conn.last_insert_rowid())
     }
+    Ok(())
 }
 
 // Sales Report
@@ -1637,9 +1690,10 @@ fn get_sales_report(
     let conn = rusqlite::Connection::open(&state.path).map_err(|e| e.to_string())?;
     
     let mut stmt = conn.prepare(
-        "SELECT COALESCE(SUM(total), 0.0), COALESCE(SUM(tax), 0.0), COUNT(id)
-         FROM orders 
-         WHERE status = 'Completed' AND date(created_at) >= date(?1) AND date(created_at) <= date(?2)"
+        "SELECT COALESCE(SUM(b.total), 0.0), COALESCE(SUM(b.tax), 0.0), COUNT(o.id)
+         FROM orders o
+         JOIN bills b ON o.id = b.order_id
+         WHERE o.status = 'Completed' AND date(o.created_at) >= date(?1) AND date(o.created_at) <= date(?2)"
     ).map_err(|e| e.to_string())?;
     
     let (total_sales, total_tax, order_count): (f64, f64, i64) = stmt.query_row([start_date, end_date], |row| {
@@ -1678,118 +1732,12 @@ pub struct PaymentSummaryReport {
 
 #[tauri::command]
 fn backup_db(target_path: String, state: tauri::State<'_, db::DbPathState>) -> Result<(), String> {
-    let source = &state.path;
-    let dest = std::path::Path::new(&target_path);
-    
-    let dest_file = if dest.is_dir() {
-        dest.join("mealdesk_backup.db")
-    } else {
-        dest.to_path_buf()
-    };
-    
-    std::fs::copy(source, &dest_file)
-        .map_err(|e| format!("Failed to create backup: {}", e))?;
-    Ok(())
+    std::fs::copy(&state.path, target_path).map(|_| ()).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn restore_db(source_path: String, state: tauri::State<'_, db::DbPathState>) -> Result<(), String> {
-    let source = std::path::Path::new(&source_path);
-    let dest = &state.path;
-    
-    if !source.exists() {
-        return Err("Source backup file does not exist".to_string());
-    }
-    
-    std::fs::copy(source, dest)
-        .map_err(|e| format!("Failed to restore database: {}", e))?;
-    Ok(())
-}
-
-#[tauri::command]
-fn get_completed_orders(state: tauri::State<'_, db::DbPathState>) -> Result<Vec<OrderHeader>, String> {
-    let conn = rusqlite::Connection::open(&state.path).map_err(|e| e.to_string())?;
-    let mut stmt = conn.prepare(
-        "SELECT o.id, o.table_id, t.name, o.customer_id, c.name, o.subtotal, o.tax, o.discount, o.service_charge, o.round_off, o.total, o.status, o.payment_mode, o.notes, o.hold_name, o.created_at, o.cancelled_by, o.cancelled_at, o.cancel_reason
-         FROM orders o 
-         LEFT JOIN tables t ON o.table_id = t.id 
-         LEFT JOIN customers c ON o.customer_id = c.id
-         WHERE o.status = 'Completed'
-         ORDER BY o.id DESC"
-    ).map_err(|e| e.to_string())?;
-    
-    let order_iter = stmt.query_map([], |row| {
-        Ok(OrderHeader {
-            id: row.get(0)?,
-            table_id: row.get(1)?,
-            table_name: row.get(2)?,
-            customer_id: row.get(3)?,
-            customer_name: row.get(4)?,
-            subtotal: row.get(5)?,
-            tax: row.get(6)?,
-            discount: row.get(7)?,
-            service_charge: row.get(8)?,
-            round_off: row.get(9)?,
-            total: row.get(10)?,
-            status: row.get(11)?,
-            payment_mode: row.get(12)?,
-            notes: row.get(13)?,
-            hold_name: row.get(14)?,
-            created_at: row.get(15)?,
-            cancelled_by: row.get(16)?,
-            cancelled_at: row.get(17)?,
-            cancel_reason: row.get(18)?,
-        })
-    }).map_err(|e| e.to_string())?;
-    
-    let mut orders = Vec::new();
-    for ord in order_iter {
-        orders.push(ord.map_err(|e| e.to_string())?);
-    }
-    Ok(orders)
-}
-
-#[tauri::command]
-fn get_customer_orders(customer_id: i64, state: tauri::State<'_, db::DbPathState>) -> Result<Vec<OrderHeader>, String> {
-    let conn = rusqlite::Connection::open(&state.path).map_err(|e| e.to_string())?;
-    let mut stmt = conn.prepare(
-        "SELECT o.id, o.table_id, t.name, o.customer_id, c.name, o.subtotal, o.tax, o.discount, o.service_charge, o.round_off, o.total, o.status, o.payment_mode, o.notes, o.hold_name, o.created_at, o.cancelled_by, o.cancelled_at, o.cancel_reason
-         FROM orders o 
-         LEFT JOIN tables t ON o.table_id = t.id 
-         LEFT JOIN customers c ON o.customer_id = c.id
-         WHERE o.customer_id = ?1 AND o.status = 'Completed'
-         ORDER BY o.id DESC"
-    ).map_err(|e| e.to_string())?;
-    
-    let order_iter = stmt.query_map([customer_id], |row| {
-        Ok(OrderHeader {
-            id: row.get(0)?,
-            table_id: row.get(1)?,
-            table_name: row.get(2)?,
-            customer_id: row.get(3)?,
-            customer_name: row.get(4)?,
-            subtotal: row.get(5)?,
-            tax: row.get(6)?,
-            discount: row.get(7)?,
-            service_charge: row.get(8)?,
-            round_off: row.get(9)?,
-            total: row.get(10)?,
-            status: row.get(11)?,
-            payment_mode: row.get(12)?,
-            notes: row.get(13)?,
-            hold_name: row.get(14)?,
-            created_at: row.get(15)?,
-            cancelled_by: row.get(16)?,
-            cancelled_at: row.get(17)?,
-            cancel_reason: row.get(18)?,
-        })
-    }).map_err(|e| e.to_string())?;
-    
-    let mut orders = Vec::new();
-    for ord in order_iter {
-        orders.push(ord.map_err(|e| e.to_string())?);
-    }
-    Ok(orders)
+    std::fs::copy(source_path, &state.path).map(|_| ()).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1834,26 +1782,29 @@ fn get_payment_mode_summary(
 ) -> Result<PaymentSummaryReport, String> {
     let conn = rusqlite::Connection::open(&state.path).map_err(|e| e.to_string())?;
     
-    let cash: f64 = conn.query_row(
-        "SELECT COALESCE(SUM(total), 0.0) FROM orders WHERE status = 'Completed' AND payment_mode = 'Cash' AND date(created_at) >= date(?1) AND date(created_at) <= date(?2)",
-        [&start_date, &end_date],
-        |row| row.get(0),
-    ).unwrap_or(0.0);
+    let get_sales_by_method = |method: &str| -> f64 {
+        conn.query_row(
+            "SELECT COALESCE(SUM(p.amount), 0.0) 
+             FROM payments p
+             JOIN bills b ON p.bill_id = b.id
+             JOIN orders o ON b.order_id = o.id
+             WHERE o.status = 'Completed' AND p.payment_method = ?1 AND date(o.created_at) >= date(?2) AND date(o.created_at) <= date(?3)",
+            [method, &start_date, &end_date],
+            |row| row.get(0),
+        ).unwrap_or(0.0)
+    };
     
-    let upi: f64 = conn.query_row(
-        "SELECT COALESCE(SUM(total), 0.0) FROM orders WHERE status = 'Completed' AND payment_mode = 'UPI' AND date(created_at) >= date(?1) AND date(created_at) <= date(?2)",
-        [&start_date, &end_date],
-        |row| row.get(0),
-    ).unwrap_or(0.0);
-    
-    let card: f64 = conn.query_row(
-        "SELECT COALESCE(SUM(total), 0.0) FROM orders WHERE status = 'Completed' AND payment_mode = 'Card' AND date(created_at) >= date(?1) AND date(created_at) <= date(?2)",
-        [&start_date, &end_date],
-        |row| row.get(0),
-    ).unwrap_or(0.0);
+    let cash = get_sales_by_method("Cash");
+    let upi = get_sales_by_method("UPI");
+    let card = get_sales_by_method("Card");
     
     let mixed: f64 = conn.query_row(
-        "SELECT COALESCE(SUM(total), 0.0) FROM orders WHERE status = 'Completed' AND payment_mode = 'Mixed' AND date(created_at) >= date(?1) AND date(created_at) <= date(?2)",
+        "SELECT COALESCE(SUM(b.total), 0.0)
+         FROM bills b
+         JOIN orders o ON b.order_id = o.id
+         WHERE o.status = 'Completed' 
+           AND (SELECT COUNT(DISTINCT payment_method) FROM payments WHERE bill_id = b.id) > 1
+           AND date(o.created_at) >= date(?1) AND date(o.created_at) <= date(?2)",
         [&start_date, &end_date],
         |row| row.get(0),
     ).unwrap_or(0.0);
@@ -1878,7 +1829,6 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             greet,
             login,
-            verify_credentials,
             get_restaurant_info,
             update_restaurant_info,
             get_categories,
@@ -1887,9 +1837,10 @@ pub fn run() {
             update_order,
             get_order,
             get_active_orders,
-            complete_payment,
             cancel_order,
             cancel_order_item,
+            generate_bill,
+            record_payments,
             get_tables,
             transfer_table,
             merge_tables,
@@ -1898,9 +1849,6 @@ pub fn run() {
             get_kot_by_id,
             get_kots_for_order,
             increment_kot_print_count,
-            get_inventory,
-            update_stock,
-            add_purchase,
             upsert_category,
             upsert_product,
             get_customers,
@@ -1964,6 +1912,9 @@ mod tests {
 
         assert!(tables.contains(&"order_item_cancellations".to_string()));
         assert!(tables.contains(&"audit_logs".to_string()));
+        assert!(tables.contains(&"bills".to_string()));
+        assert!(tables.contains(&"payments".to_string()));
+        assert!(!tables.contains(&"inventory".to_string()));
 
         // 2. Verify cancellation columns in orders table
         let mut stmt = conn.prepare("PRAGMA table_info(orders)").unwrap();
@@ -1976,6 +1927,8 @@ mod tests {
         assert!(cols.contains(&"cancelled_by".to_string()));
         assert!(cols.contains(&"cancelled_at".to_string()));
         assert!(cols.contains(&"cancel_reason".to_string()));
+        assert!(!cols.contains(&"total".to_string()));
+        assert!(!cols.contains(&"hold_name".to_string()));
 
         // 3. Verify kot_id column in order_items table
         let mut stmt = conn.prepare("PRAGMA table_info(order_items)").unwrap();
@@ -1989,30 +1942,49 @@ mod tests {
     }
 
     #[test]
-    fn test_user_authentication_roles() {
+    fn test_admin_authentication_and_no_roles() {
         let conn = setup_test_db();
 
         // Check seeded users
         struct User {
-            _username: String,
-            role: String,
+            username: String,
         }
 
-        let mut stmt = conn.prepare("SELECT username, role FROM users").unwrap();
+        let mut stmt = conn.prepare("SELECT username FROM users").unwrap();
         let users: Vec<User> = stmt
             .query_map([], |row| {
                 Ok(User {
-                    _username: row.get(0)?,
-                    role: row.get(1)?,
+                    username: row.get(0)?,
                 })
             })
             .unwrap()
             .map(|r| r.unwrap())
             .collect();
 
-        // We expect Owner, Manager, Cashier roles
-        assert!(users.iter().any(|u| u.role == "Owner"));
-        assert!(users.iter().any(|u| u.role == "Manager"));
-        assert!(users.iter().any(|u| u.role == "Cashier"));
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0].username, "admin");
+
+        // Verify the admin password is hash of "admin123"
+        let hashed_pw: String = conn
+            .query_row(
+                "SELECT password_hash FROM users WHERE username = 'admin'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(hashed_pw, db::hash_password("admin123"));
+
+        // Verify the users table schema only contains id, username, and password_hash
+        let mut pragma_stmt = conn.prepare("PRAGMA table_info(users)").unwrap();
+        let cols: Vec<String> = pragma_stmt
+            .query_map([], |row| row.get(1))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert!(!cols.contains(&"role".to_string()));
+        assert_eq!(cols.len(), 3);
+        assert!(cols.contains(&"id".to_string()));
+        assert!(cols.contains(&"username".to_string()));
+        assert!(cols.contains(&"password_hash".to_string()));
     }
 }
