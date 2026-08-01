@@ -173,17 +173,6 @@
           </section>
 
           <section class="cart-section">
-            <div class="cart-header">
-              <span class="cart-title">Current Order</span>
-              <div style="display: flex; gap: 4px;">
-                <button id="kot-btn" class="quick-role-btn" style="background: var(--accent); color: black; border-color: var(--accent);">KOT</button>
-
-                <button id="clear-cart-btn" class="quick-role-btn"
-                  style="color: var(--danger); border-color: rgba(239, 68, 68, 0.2);">Clear</button>
-                <button id="cancel-order-btn" class="quick-role-btn hidden"
-                  style="color: var(--danger); border-color: var(--danger); background: rgba(239, 68, 68, 0.05);">Cancel Order</button>
-              </div>
-            </div>
 
             <!-- Customer Selection & Table Selection -->
             <div style="padding: 10px 16px; border-bottom: 1px solid var(--border); display: flex; gap: 8px;">
@@ -231,9 +220,12 @@
                 <span>Total</span>
                 <span id="cart-total">₹0.00</span>
               </div>
-              <button id="checkout-btn" class="checkout-btn">
-                <span>💳</span> Collect Payment
-              </button>
+              <div style="display: flex; gap: 6px; align-items: center;">
+                <button id="kot-btn" class="quick-role-btn" style="background: var(--accent); color: black; border-color: var(--accent);">KOT</button>
+                <button id="clear-cart-btn" class="quick-role-btn" style="color: var(--danger); border-color: rgba(239, 68, 68, 0.35);">Clear</button>
+                <button id="cancel-order-btn" class="quick-role-btn hidden" style="color: var(--danger); border-color: var(--danger); background: rgba(239, 68, 68, 0.05);">Cancel Order</button>
+                <button id="checkout-btn" class="quick-role-btn" style="flex: 1; background: var(--primary); color: white; border-color: var(--primary);">💳 Collect Payment</button>
+              </div>
             </div>
           </section>
         </div>

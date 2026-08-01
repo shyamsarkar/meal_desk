@@ -621,17 +621,28 @@ function renderCategories() {
     return;
   }
 
-  categories.forEach((cat, index) => {
+  // "All Items" tab — default selected
+  const allTab = document.createElement("div");
+  allTab.className = "category-tab active";
+  allTab.textContent = "All Items";
+  allTab.dataset.id = "all";
+  allTab.addEventListener("click", () => {
+    document.querySelectorAll(".category-tab").forEach(t => t.classList.remove("active"));
+    allTab.classList.add("active");
+    activeCategoryId = null;
+    loadAllProducts();
+  });
+  posCategoriesContainer.appendChild(allTab);
+
+  // Load all products by default
+  activeCategoryId = null;
+  loadAllProducts();
+
+  categories.forEach((cat) => {
     const tab = document.createElement("div");
     tab.className = "category-tab";
     tab.textContent = cat.name;
     tab.dataset.id = cat.id;
-
-    if (index === 0) {
-      tab.classList.add("active");
-      activeCategoryId = cat.id;
-      loadProducts(cat.id);
-    }
 
     tab.addEventListener("click", () => {
       document.querySelectorAll(".category-tab").forEach(t => t.classList.remove("active"));
@@ -642,6 +653,20 @@ function renderCategories() {
 
     posCategoriesContainer.appendChild(tab);
   });
+}
+
+async function loadAllProducts() {
+  try {
+    const allProducts = [];
+    for (const cat of categories) {
+      const catProducts = await invoke("get_products_by_category", { categoryId: cat.id });
+      allProducts.push(...catProducts);
+    }
+    products = allProducts;
+    renderProducts(products);
+  } catch (err) {
+    console.error(err);
+  }
 }
 
 async function loadProducts(categoryId) {
@@ -687,16 +712,6 @@ function filterProducts() {
   renderProducts(filtered);
 }
 
-function updateCartHeaderButtons() {
-  if (activeOrderId) {
-    cancelOrderBtn.classList.remove("hidden");
-    clearCartBtn.classList.add("hidden");
-  } else {
-    cancelOrderBtn.classList.add("hidden");
-    clearCartBtn.classList.remove("hidden");
-  }
-}
-
 function addToCart(product) {
   if (activeOrderStatus === "Billed" || activeOrderStatus === "Completed") {
     alert("Order is billed and cannot be modified.");
@@ -731,7 +746,15 @@ function updateCartQty(productId, change) {
 }
 
 function renderCart() {
-  updateCartHeaderButtons();
+  // Update button visibility inline (moved to checkout area)
+  if (activeOrderId) {
+    cancelOrderBtn.classList.remove("hidden");
+    clearCartBtn.classList.add("hidden");
+  } else {
+    cancelOrderBtn.classList.add("hidden");
+    clearCartBtn.classList.remove("hidden");
+  }
+
   cartItemsList.innerHTML = "";
   
   const isLocked = activeOrderStatus === "Billed" || activeOrderStatus === "Completed";
