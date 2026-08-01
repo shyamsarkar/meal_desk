@@ -19,8 +19,6 @@ pub fn init_db(app_handle: &AppHandle) -> Result<PathBuf, String> {
     let app_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
     fs::create_dir_all(&app_dir).map_err(|e| e.to_string())?;
     let db_path = app_dir.join("mealdesk.db");
-    eprintln!("Database initialized at: {:?}", db_path);
-    
     let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
     
     // Run migration first (handles existing table renaming and schema updates)
@@ -171,10 +169,14 @@ fn create_tables(conn: &Connection) -> Result<(), String> {
             gst_rate REAL NOT NULL DEFAULT 0.0,
             image_path TEXT,
             is_available INTEGER NOT NULL DEFAULT 1,
+            is_veg INTEGER NOT NULL DEFAULT 1,
             FOREIGN KEY (category_id) REFERENCES categories (id) ON DELETE RESTRICT
         );",
         [],
     ).map_err(|e| e.to_string())?;
+
+    // Add is_veg column to existing products table if it doesn't exist yet (migration)
+    let _ = conn.execute("ALTER TABLE products ADD COLUMN is_veg INTEGER NOT NULL DEFAULT 1;", []);
 
     conn.execute(
         "CREATE TABLE IF NOT EXISTS customers (
@@ -334,20 +336,24 @@ fn seed_default_data(conn: &Connection) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     }
 
-    // Seed sample categories if empty
+    // Seed default categories and products if empty
     let cat_count: i64 = conn
         .query_row("SELECT COUNT(*) FROM categories", [], |row| row.get(0))
         .map_err(|e| e.to_string())?;
 
     if cat_count == 0 {
-        let categories = vec![
-            ("Beverages", "Cold & hot drinks"),
-            ("Starters", "Appetizers and quick bites"),
-            ("Main Course", "Delicious main dishes"),
-            ("Desserts", "Sweet treats"),
+        // (name, description)
+        let categories: Vec<(&str, &str)> = vec![
+            ("Starters",     "Appetizers and quick bites"),
+            ("Main Course",  "Heavy meals and curries"),
+            ("Breads",       "Indian breads cooked in tandoor"),
+            ("South Indian", "Authentic dishes from Southern India"),
+            ("Indo-Chinese", "Fusion Chinese dishes with Indian flavors"),
+            ("Beverages",    "Cold and hot drinks"),
+            ("Desserts",     "Sweets and ice creams"),
         ];
 
-        for (name, desc) in categories {
+        for (name, desc) in &categories {
             conn.execute(
                 "INSERT INTO categories (name, description) VALUES (?1, ?2)",
                 [name, desc],
@@ -355,22 +361,71 @@ fn seed_default_data(conn: &Connection) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
         }
 
-        // Add some default products linked to these categories
-        let sample_products = vec![
-            ("Iced Latte", 1, 150.00, 18.0),
-            ("Masala Chai", 1, 40.00, 5.0),
-            ("Paneer Tikka", 2, 280.00, 18.0),
-            ("Chicken Wings", 2, 320.00, 18.0),
-            ("Butter Chicken with Naan", 3, 420.00, 18.0),
-            ("Veg Fried Rice", 3, 240.00, 18.0),
-            ("Chocolate Brownie", 4, 180.00, 18.0),
-            ("Gulab Jamun (2 pcs)", 4, 80.00, 5.0),
+        // (name, category_name, price, gst_rate, is_veg)
+        // All items use 5% GST for food; adjust as needed.
+        let products: Vec<(&str, &str, f64, f64, i32)> = vec![
+            // Starters
+            ("Paneer Tikka",       "Starters", 250.0, 5.0, 1),
+            ("Crispy Corn",        "Starters", 180.0, 5.0, 1),
+            ("French Fries",       "Starters", 120.0, 5.0, 1),
+            ("Chicken Tikka",      "Starters", 320.0, 5.0, 0),
+            ("Chilli Chicken",     "Starters", 290.0, 5.0, 0),
+            ("Fish Tikka",         "Starters", 380.0, 5.0, 0),
+            ("Hara Bhara Kebab",   "Starters", 220.0, 5.0, 1),
+            ("Chicken 65",         "Starters", 300.0, 5.0, 0),
+            // Main Course
+            ("Paneer Butter Masala",           "Main Course", 350.0, 5.0, 1),
+            ("Dal Makhani",                    "Main Course", 280.0, 5.0, 1),
+            ("Veg Dum Biryani",                "Main Course", 260.0, 5.0, 1),
+            ("Butter Chicken (Murgh Makhani)", "Main Course", 420.0, 5.0, 0),
+            ("Chicken Biryani",                "Main Course", 380.0, 5.0, 0),
+            ("Mutton Rogan Josh",              "Main Course", 480.0, 5.0, 0),
+            ("Palak Paneer",                   "Main Course", 330.0, 5.0, 1),
+            ("Chana Masala",                   "Main Course", 240.0, 5.0, 1),
+            // Breads
+            ("Tandoori Roti",  "Breads", 30.0, 5.0, 1),
+            ("Butter Naan",    "Breads", 50.0, 5.0, 1),
+            ("Garlic Naan",    "Breads", 70.0, 5.0, 1),
+            ("Lachha Paratha", "Breads", 60.0, 5.0, 1),
+            // South Indian
+            ("Masala Dosa",          "South Indian", 160.0, 5.0, 1),
+            ("Plain Dosa",           "South Indian", 120.0, 5.0, 1),
+            ("Idli Sambar (2 pcs)",  "South Indian",  90.0, 5.0, 1),
+            ("Medu Vada (2 pcs)",    "South Indian", 100.0, 5.0, 1),
+            ("Onion Uttapam",        "South Indian", 140.0, 5.0, 1),
+            ("Chicken Chettinad",    "South Indian", 360.0, 5.0, 0),
+            // Indo-Chinese
+            ("Veg Hakka Noodles",         "Indo-Chinese", 220.0, 5.0, 1),
+            ("Chicken Hakka Noodles",     "Indo-Chinese", 260.0, 5.0, 0),
+            ("Veg Fried Rice",            "Indo-Chinese", 210.0, 5.0, 1),
+            ("Chicken Fried Rice",        "Indo-Chinese", 250.0, 5.0, 0),
+            ("Gobi Manchurian (Dry/Gravy)","Indo-Chinese", 230.0, 5.0, 1),
+            ("Chilli Paneer (Dry/Gravy)", "Indo-Chinese", 280.0, 5.0, 1),
+            ("Chicken Lollipop",          "Indo-Chinese", 320.0, 5.0, 0),
+            ("Sweet Corn Veg Soup",       "Indo-Chinese", 150.0, 5.0, 1),
+            // Beverages
+            ("Mineral Water (1L)", "Beverages",  40.0, 5.0, 1),
+            ("Fresh Lime Soda",    "Beverages",  90.0, 5.0, 1),
+            ("Mango Lassi",        "Beverages", 120.0, 5.0, 1),
+            ("Cold Coffee",        "Beverages", 150.0, 5.0, 1),
+            ("Masala Chai",        "Beverages",  60.0, 5.0, 1),
+            // Desserts
+            ("Gulab Jamun (2 pcs)",          "Desserts",  90.0, 5.0, 1),
+            ("Rasmalai (2 pcs)",             "Desserts", 140.0, 5.0, 1),
+            ("Sizzling Brownie with Ice Cream","Desserts", 220.0, 5.0, 1),
+            ("Vanilla Ice Cream",            "Desserts",  80.0, 5.0, 1),
         ];
 
-        for (name, cat_id, price, gst) in sample_products {
+        for (name, cat_name, price, gst, is_veg) in products {
+            let cat_id: i64 = conn.query_row(
+                "SELECT id FROM categories WHERE name = ?1",
+                [cat_name],
+                |row| row.get(0),
+            ).map_err(|e| format!("Category '{}' not found: {}", cat_name, e))?;
+
             conn.execute(
-                "INSERT INTO products (category_id, name, price, gst_rate, is_available) VALUES (?1, ?2, ?3, ?4, 1)",
-                rusqlite::params![cat_id, name, price, gst],
+                "INSERT INTO products (category_id, name, price, gst_rate, is_available, is_veg) VALUES (?1, ?2, ?3, ?4, 1, ?5)",
+                rusqlite::params![cat_id, name, price, gst, is_veg],
             )
             .map_err(|e| e.to_string())?;
         }

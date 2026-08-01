@@ -38,6 +38,7 @@ pub struct Product {
     pub gst_rate: f64,
     pub image_path: Option<String>,
     pub is_available: bool,
+    pub is_veg: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -146,11 +147,6 @@ pub struct PaymentInput {
 }
 
 // Commands
-#[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
-}
-
 fn get_db_timestamp(conn: &rusqlite::Connection) -> String {
     conn.query_row("SELECT strftime('%Y-%m-%dT%H:%M:%SZ', 'now')", [], |row| row.get(0)).unwrap_or_else(|_| "unknown".to_string())
 }
@@ -204,7 +200,6 @@ fn login(
                  VALUES (?1, 'login_success', 'users', NULL, 'Login successful', ?2)",
                 rusqlite::params![user_info.username, now],
             );
-            eprintln!("[MealDesk] Login success for user: {}", user_info.username);
             Ok(user_info)
         }
         Err(e) => {
@@ -216,7 +211,6 @@ fn login(
                  VALUES (?1, 'login_failed', 'users', NULL, ?2, ?3)",
                 rusqlite::params![username_trimmed, details, now],
             );
-            eprintln!("[MealDesk] Login FAILED for username: '{}' — {}", username_trimmed, e);
             Err("Invalid username or password.".to_string())
         }
     }
@@ -295,12 +289,13 @@ fn get_products_by_category(
 ) -> Result<Vec<Product>, String> {
     let conn = rusqlite::Connection::open(&state.path).map_err(|e| e.to_string())?;
     let mut stmt = conn
-        .prepare("SELECT id, category_id, name, price, gst_rate, image_path, is_available FROM products WHERE category_id = ?1")
+        .prepare("SELECT id, category_id, name, price, gst_rate, image_path, is_available, is_veg FROM products WHERE category_id = ?1")
         .map_err(|e| e.to_string())?;
     
     let prod_iter = stmt
         .query_map([category_id], |row| {
             let is_available_val: i32 = row.get(6)?;
+            let is_veg_val: i32 = row.get(7)?;
             Ok(Product {
                 id: row.get(0)?,
                 category_id: row.get(1)?,
@@ -309,6 +304,7 @@ fn get_products_by_category(
                 gst_rate: row.get(4)?,
                 image_path: row.get(5)?,
                 is_available: is_available_val != 0,
+                is_veg: is_veg_val != 0,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -717,16 +713,6 @@ fn get_order(order_id: i64, state: tauri::State<'_, db::DbPathState>) -> Result<
     }
     
     Ok(OrderOutput { header, items })
-}
-
-#[tauri::command]
-fn get_active_orders(state: tauri::State<'_, db::DbPathState>) -> Result<Vec<OrderHeader>, String> {
-    let conn = rusqlite::Connection::open(&state.path).map_err(|e| e.to_string())?;
-    fetch_orders_by_query(
-        &conn, 
-        &format!("{} WHERE o.status IN ('Pending', 'Billed') ORDER BY o.id DESC", ORDERS_SELECT_SQL),
-        &[]
-    )
 }
 
 #[tauri::command]
@@ -1569,6 +1555,32 @@ fn increment_kot_print_count(
 }
 
 #[tauri::command]
+fn delete_category(
+    id: i64,
+    state: tauri::State<'_, db::DbPathState>,
+) -> Result<(), String> {
+    let conn = rusqlite::Connection::open(&state.path).map_err(|e| e.to_string())?;
+
+    // Check if any products exist under this category
+    let product_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM products WHERE category_id = ?1",
+        [id],
+        |row| row.get(0),
+    ).unwrap_or(0);
+
+    if product_count > 0 {
+        return Err(format!(
+            "Cannot delete category: {} product(s) still belong to it. Delete or reassign products first.",
+            product_count
+        ));
+    }
+
+    conn.execute("DELETE FROM categories WHERE id = ?1", [id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
 fn upsert_category(
     id: Option<i64>,
     name: String,
@@ -1588,6 +1600,32 @@ fn upsert_category(
             params![name, description],
         ).map_err(|e| e.to_string())?;
     }
+    Ok(())
+}
+
+#[tauri::command]
+fn delete_product(
+    id: i64,
+    state: tauri::State<'_, db::DbPathState>,
+) -> Result<(), String> {
+    let conn = rusqlite::Connection::open(&state.path).map_err(|e| e.to_string())?;
+
+    // Check if product has been used in any order items
+    let order_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM order_items WHERE product_id = ?1",
+        [id],
+        |row| row.get(0),
+    ).unwrap_or(0);
+
+    if order_count > 0 {
+        return Err(format!(
+            "Cannot delete product: it has been used in {} order(s). Mark it as unavailable instead.",
+            order_count
+        ));
+    }
+
+    conn.execute("DELETE FROM products WHERE id = ?1", [id])
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -1827,7 +1865,6 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            greet,
             login,
             get_restaurant_info,
             update_restaurant_info,
@@ -1836,7 +1873,6 @@ pub fn run() {
             create_order,
             update_order,
             get_order,
-            get_active_orders,
             cancel_order,
             cancel_order_item,
             generate_bill,
@@ -1850,7 +1886,9 @@ pub fn run() {
             get_kots_for_order,
             increment_kot_print_count,
             upsert_category,
+            delete_category,
             upsert_product,
+            delete_product,
             get_customers,
             upsert_customer,
             get_sales_report,

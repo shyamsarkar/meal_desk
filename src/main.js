@@ -46,12 +46,10 @@ let settingsBackupPath, settingsBtnBackup, settingsRestorePath, settingsBtnResto
 
 // Modal elements
 let successModal, modalTitle, modalMsg, modalCloseBtn;
-let holdModal, holdNameInput, holdModalCancel, holdModalSave, resumeModal, resumeModalClose, heldOrdersList;
 let itemNotesModal, notesProductName, itemNotesText, notesModalCancel, notesModalSave, activeNotesItemIndex;
 let tablesActionModal, tableActionTitle, tableActionFromSelect, tableActionToSelect, tableActionCancel, tableActionSubmit, activeTableActionType;
 let categoryModal, categoryModalTitle, categoryModalName, categoryModalDesc, categoryModalCancel, categoryModalSave, activeCategoryEditId;
 let productModal, productModalTitle, productModalCategory, productModalName, productModalPrice, productModalGst, productModalAvailable, productModalCancel, productModalSave, activeProductEditId;
-let purchaseModal, purchaseModalProduct, purchaseModalQty, purchaseModalSupplier, purchaseModalCost, purchaseModalCancel, purchaseModalSave;
 let customerModal, customerModalTitle, customerModalName, customerModalPhone, customerModalEmail, customerModalCancel, customerModalSave, activeCustomerEditId;
 let customerHistoryModal, custHistoryName, custHistoryList, custHistoryClose;
 let checkoutModal, checkoutModalAmount, checkoutPaymentMode, checkoutSplitBlock, checkoutChangeBlock, checkoutChangeRow, checkoutChangeAmount, checkoutCashReceived, checkoutModalCancel, checkoutModalPrint, checkoutModalConfirm;
@@ -1396,7 +1394,10 @@ async function renderCategoryEditor() {
       item.className = "category-editor-item";
       item.innerHTML = `
         <span class="category-editor-name">${c.name}</span>
-        <button class="quick-role-btn" style="padding: 2px 6px;">✏️</button>
+        <div style="display:flex; gap:6px;">
+          <button class="quick-role-btn edit-cat-btn" style="padding: 2px 6px;">✏️</button>
+          <button class="quick-role-btn del-cat-btn" style="padding: 2px 6px; color: var(--danger); border-color: rgba(239,68,68,0.3);">🗑️</button>
+        </div>
       `;
 
       item.addEventListener("click", (e) => {
@@ -1406,9 +1407,22 @@ async function renderCategoryEditor() {
         renderProductsEditorList(c.id);
       });
 
-      item.querySelector("button").addEventListener("click", (e) => {
+      item.querySelector(".edit-cat-btn").addEventListener("click", (e) => {
         e.stopPropagation();
         openCategoryModal(c);
+      });
+
+      item.querySelector(".del-cat-btn").addEventListener("click", async (e) => {
+        e.stopPropagation();
+        if (!confirm(`Delete category "${c.name}"? This cannot be undone.`)) return;
+        try {
+          await invoke("delete_category", { id: c.id });
+          categories = await invoke("get_categories");
+          renderCategories();
+          renderCategoryEditor();
+        } catch (err) {
+          alert("Cannot delete: " + err);
+        }
       });
 
       menuEditorCategories.appendChild(item);
@@ -1484,9 +1498,19 @@ async function renderProductsEditorList(categoryId) {
         </td>
         <td style="padding:10px; text-align:right;">
           <button class="quick-role-btn edit-p-btn">Edit</button>
+          <button class="quick-role-btn del-p-btn" style="margin-left:4px; color: var(--danger); border-color: rgba(239,68,68,0.3);">Delete</button>
         </td>
       `;
       tr.querySelector(".edit-p-btn").addEventListener("click", () => openProductModal(p));
+      tr.querySelector(".del-p-btn").addEventListener("click", async () => {
+        if (!confirm(`Delete "${p.name}"? This cannot be undone.`)) return;
+        try {
+          await invoke("delete_product", { id: p.id });
+          renderProductsEditorList(categoryId);
+        } catch (err) {
+          alert("Cannot delete: " + err);
+        }
+      });
       menuEditorProductsList.appendChild(tr);
     });
   } catch (err) {
@@ -1830,6 +1854,13 @@ async function saveSettings(e) {
 // 9. Send KOT & Print KOT Features
 async function sendKot() {
   if (cart.length === 0) return;
+
+  // Block KOT if there are no new (un-KOT'd) items to send
+  const hasNewItems = cart.some(item => !item.kot_id);
+  if (!hasNewItems) {
+    alert("No new items to send. All items have already been sent to the kitchen.");
+    return;
+  }
 
   const tableIdVal = cartTableSelect.value ? parseInt(cartTableSelect.value) : null;
   const custIdVal = cartCustomerSelect.value ? parseInt(cartCustomerSelect.value) : null;
